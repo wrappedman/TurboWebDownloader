@@ -9,7 +9,9 @@
 - Opens a three-step project wizard on first launch (also available through **New project**).
 - Renders pages in real Chromium, waits for dynamic content, and performs bounded scrolling for common lazy-loaded content.
 - Follows same-domain page links, with configurable depth (0–10) and page budget (1–500).
-- Collects selected stylesheets, images, fonts, JavaScript and media responses.
+- Collects selected stylesheets, images, fonts, JavaScript and media responses, then recovers missing DOM resources, responsive image candidates and recursive CSS imports/fonts/backgrounds with bounded retries.
+- Analyzes nested/gzipped sitemaps and rendered links before capture, displaying known URL counts, inspected pages, warnings and an option to use the discovered count as the page limit.
+- Shows the absolute storage location for each project, with Copy path and native Open folder controls. Native ZIP export uses a Save As dialog; web mode uses browser downloads.
 - Stores the rendered DOM, rewrites captured page/resource links and CSS references, and optionally formats HTML, CSS and JavaScript.
 - Defaults to static snapshots: source JavaScript is saved if selected, but removed from the rendered page to avoid framework rehydration changing the snapshot. Experimental offline script execution is opt-in.
 - Provides a persistent project library, search, filters, sorting, compact view, live activity logs, safe stop, capture-again, first-page screenshots and ZIP exports.
@@ -100,28 +102,39 @@ dist/TurboWebDownloader/TurboWebDownloader.exe
 
 ### Offline archives
 
-Use **Browse offline** inside a completed project or **Export ZIP**. Extract the ZIP and open `index.html`. For best browser compatibility, serve the extracted folder locally:
+Use **Browse offline** inside a completed project or **Save as ZIP**. Desktop mode opens a native Save As dialog and confirms the chosen path. Web mode downloads to your browser's configured location. ZIPs are built on disk under the data directory's `.exports` cache, rather than buffering the full archive in RAM. Extract the ZIP and open `index.html`. For best browser compatibility, serve the extracted folder locally:
 
 ```bash
 python -m http.server 8081
 ```
 
-Then open http://127.0.0.1:8081. Keep the `files` directory intact. All captured documents and resources use flat, deterministic filenames to avoid query-string collisions and simplify relative links. `manifest.json` maps original URLs to files. `report.json` records options, counts, warnings and errors.
+Then open http://127.0.0.1:8081. Keep the `files` directory intact. All captured documents and resources use flat, deterministic filenames to avoid query-string collisions and simplify relative links. `manifest.json` maps original URLs to files. `report.json` records options, counts, warnings and errors. `missing-resources.json` lists resource URLs and reasons still failing after recovery. Re-capture older projects to benefit from the improved resource collection.
 
 Data is stored by default in **`~/.turbowebdownloader`**, outside the source tree. Set `TURBOWEB_DATA` to change it. Removing that folder deletes your local library. Preferences are stored in the UI browser's local storage. Interrupted captures are marked on restart; **Capture again** creates a fresh project rather than resuming a partially executed browser session.
+
+### Storage location and preflight analysis
+
+On Windows the default project path is `%USERPROFILE%\.turbowebdownloader\<project-id>`. The exact resolved path is shown in the project panel and the root folder in Preferences. `files` contains the captured HTML/resources; the parent folder contains `index.html`, reports and the screenshot. To use a different root, set `TURBOWEB_DATA` before launch (existing projects are not automatically moved):
+
+```bat
+set "TURBOWEB_DATA=D:\WebArchives"
+.venv\Scripts\python.exe desktop.py
+```
+
+The wizard starts analysis when you enter Capture settings. You can stop it, refresh it, or use the discovered count (capped at the supported 500-page capture limit). Analysis inspects up to 10/50/100 pages, depth 3, plus up to 20 sitemap files and 10,000 sitemap URLs. Sitemap traversal has a 30-second scheduling budget (an in-flight request can finish afterward); rendered inspection has a 2-minute budget. Analysis and capture share the single browser-work queue. Counts may be partial, sitemaps may be stale, and unreachable/private/interaction-only pages cannot be counted reliably. **Known URLs are not a verified total of all pages.** Capture still respects its selected depth/page limit and robots policy; discovered does not mean successfully archived.
 
 ## Scope and honest limitations
 
 This is a rendered-page archiver, **not a clone of a site's backend**. It never retrieves server source code. There is no universal, pixel-identical archive for every modern website:
 
 - Forms, payments, authenticated sessions, server search, WebSockets, API-driven interactions, DRM, canvas/WebGL, embedded cross-origin frames, blob URLs and streaming media may not work offline.
-- Only pages reached through normal anchors within the configured depth/page limit are captured. This is not an automatic click-through tool for every SPA state. URL fragments are treated as anchors, not separate SPA routes.
+- Pages are discovered through normal anchors and, when enabled at depth 1+, sitemaps, within the configured depth/page limit. This is not an automatic click-through tool for every SPA state. URL fragments are treated as anchors, not separate SPA routes.
 - Chromium uses a fixed 1440 × 1000 viewport. Responsive layouts at other sizes, consent prompts, anti-bot pages and content with very long delays may differ.
-- Lazy scrolling is bounded to four viewport heights. Offscreen/interaction-only resources might not be requested. Font/image loading failures can reduce fidelity.
+- Lazy scrolling is bounded to 40 scroll steps and waits for bottom stability; common lazy attributes are promoted and selected images/fonts are awaited. Resource recovery also inspects DOM references, responsive candidates and stylesheet dependencies. Infinite feeds, unusual custom loaders, inaccessible CDN resources and interaction-only states may still be incomplete; failed recovery URLs appear in `missing-resources.json`. CSS-in-JS style rules are serialized when accessible.
 - Selected scripts are downloaded, but arbitrary JavaScript URL strings, ES module imports and runtime API calls are not universally rewritten. Enabling scripts may change the saved DOM. Formatting is best-effort; HTML whitespace-sensitive content can change with prettification. Turn off readable source formatting when whitespace fidelity matters.
 - Resources not captured (including excluded categories), links outside the capture, and unsupported URL references remain online. An archive is not guaranteed to make zero network requests; use disconnected browsing when that matters.
 - There is a 25 MB per-resource / 500 MB total resource budget. Streaming/video and huge sites are intentionally constrained. Response-body limits are checked after buffering when no size header is supplied.
-- One capture runs at a time, with up to five queued/running jobs. Stop is cooperative: an in-flight navigation can finish or time out before the archive is finalized. ZIP export is buffered in memory.
+- One capture runs at a time, with up to five queued/running jobs. Stop is cooperative: an in-flight navigation can finish or time out before the archive is finalized. ZIP exports are disk-backed and cached; ensure adequate free disk space for both the archive and ZIP.
 - No credentials, cookie import, login automation, paywall bypass, proxy rotation or CAPTCHA bypass are provided.
 
 Only archive content you own or have permission to save, and follow site terms and copyright rules. Robots.txt is respected by default (page-level policy; resources are still subject to browser loading). The app identifies itself as TurboWebDownloader. If robots.txt cannot be fetched, a warning is logged; HTTP 401/403 stops the capture.
@@ -158,6 +171,10 @@ build-windows.bat        Windows EXE build recipe
 scripts/make_icon.py     Dependency-free original ICO/PNG generator
 turboweb/app.py          Local API, exports and sandboxed archive serving
 turboweb/engine.py       Crawl queue, browser capture, persistence and rewriting
+turboweb/discovery.py    Preflight URL discovery through sitemaps/rendered links
+turboweb/capture_tools.py Lazy preparation, resource discovery and retry requests
+turboweb/exports.py      Disk-backed ZIP generation
+turboweb/native.py       Desktop Save As / Open folder bridge
 turboweb/templates/     English interface
 turboweb/static/        Styles, animations, JavaScript and original branding
 tests/                   Automated unit/API tests

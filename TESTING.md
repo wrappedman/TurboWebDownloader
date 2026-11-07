@@ -41,3 +41,9 @@ The repository includes a Windows build BAT, not a pre-built or signed EXE.
 Startup launchers no longer force a Playwright browser download. Added six tests covering installed Windows Edge discovery when Playwright Chromium is absent, bundled-browser priority, explicit paths with spaces/quotes, invalid overrides, no-browser diagnostics and launch-failure fallback. Discovery tests simulate Windows paths; they are not evidence of a real Windows desktop launch.
 
 Latest validation: 34 unit/API/startup tests pass; 3 optional browser checks skip without an explicit executable. With the alternate local Chromium, all 37 tests pass (including the existing rendered capture and UI checks).
+
+## Follow-up: exports, storage, image recovery and discovery
+
+Latest suite: **55 passed** with a real alternate Chromium; without the browser override, **51 passed, 4 skipped**. New coverage includes browser ZIP downloads with archive-content checks, frontend native-export dispatch, a mocked native Save As dialog/cancellation, project storage paths, scan input validation, nested and gzipped sitemap parsing, exclusion of image-sitemap locations, redirect validation/disposal, transient resource retries, srcset/lazy resource discovery and extensionless CSS/font references. The real rendered fixture now verifies unrequested 2x image recovery, deep/lazy images, a transiently failing image, imported CSS, serialized CSSOM-injected styles and offline image rendering with HTTP(S) blocked. The actual preflight service is tested against the local sitemap fixture.
+
+Native Save As is unit-tested with a mocked pywebview window; the actual Windows dialog still needs a Windows manual check. Public-site completeness and exact site totals are not guaranteed.

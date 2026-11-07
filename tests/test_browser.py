@@ -6,6 +6,7 @@ The private-network guard is bypassed ONLY for this in-process test fixture.
 import json
 import os
 import threading
+import time
 
 import pytest
 from flask import Flask, Response
@@ -23,7 +24,7 @@ def test_real_rendered_capture(tmp_path, monkeypatch, store_scripts):
 
     @fixture.get('/')
     def home():
-        return '<!doctype html><html><head><link rel="stylesheet" href="/site.css"></head><body><h1>Fixture</h1><a href="/next">Next</a><script src="/app.js"></script></body></html>'
+        return '<!doctype html><html><head><link rel="stylesheet" href="/site.css"></head><body><h1>Fixture</h1><a href="/next">Next</a><img id="lazy" data-src="/lazy.svg"><img id="responsive" src="/dot.svg" srcset="/dot.svg 1x, /two.svg 2x"><img id="retry" src="/retry.svg"><img id="deep" loading="lazy" src="/far.svg" style="margin-top:7000px"><script src="/app.js"></script></body></html>'
 
     @fixture.get('/next')
     def next_page():
@@ -35,15 +36,38 @@ def test_real_rendered_capture(tmp_path, monkeypatch, store_scripts):
 
     @fixture.get('/site.css')
     def css():
-        return Response('body{color:rgb(100,50,200);background-image:url("/dot.svg")}', mimetype='text/css')
+        return Response('@import "/theme.css"; body{color:rgb(100,50,200);background-image:url("/dot.svg")}', mimetype='text/css')
 
+    @fixture.get('/lazy.svg')
+    @fixture.get('/two.svg')
+    @fixture.get('/far.svg')
     @fixture.get('/dot.svg')
     def image():
         return Response('<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><rect width="1" height="1" fill="white"/></svg>', mimetype='image/svg+xml')
 
     @fixture.get('/app.js')
     def js():
-        return Response('document.querySelector("h1").textContent="Rendered by JavaScript";', mimetype='application/javascript')
+        return Response('document.querySelector("h1").textContent="Rendered by JavaScript";const s=document.createElement("style");document.head.append(s);s.sheet.insertRule("h1{border-top:3px solid red}");', mimetype='application/javascript')
+
+    @fixture.get('/sitemap.xml')
+    def sitemap():
+        return Response('<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><sitemap><loc>/pages.xml</loc></sitemap></sitemapindex>', mimetype='application/xml')
+
+    @fixture.get('/pages.xml')
+    def sitemap_pages():
+        return Response('<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>/</loc></url><url><loc>/next</loc></url><url><loc>/unlinked</loc></url></urlset>', mimetype='application/xml')
+
+    @fixture.get('/theme.css')
+    def imported_css():
+        return Response('h1{background-image:url(/two.svg)}', mimetype='text/css')
+
+    retries = [0]
+    @fixture.get('/retry.svg')
+    def transient_image():
+        retries[0] += 1
+        if retries[0] <= 2:
+            return Response('transient', status=503)
+        return image()
 
     server = make_server('127.0.0.1', 0, fixture, threaded=True)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -62,9 +86,14 @@ def test_real_rendered_capture(tmp_path, monkeypatch, store_scripts):
         assert job['assets'] >= (3 if store_scripts else 2)
         folder = tmp_path/'fixture'
         manifest = json.loads((folder/'manifest.json').read_text())
+        assert job['discovered'] >= 3
+        for resource in ('lazy.svg','two.svg','far.svg','retry.svg','theme.css'):
+            assert url+resource in manifest['urls'], (resource, job['logs'])
+        assert job['failed_assets'] == 0
         assert (url+'app.js' in manifest['urls']) == store_scripts
         first = (folder/'files'/job['entry']).read_text()
         assert 'Rendered by JavaScript' in first
+        assert 'border-top' in first
         assert '<script' not in first
         assert manifest['urls'][url+'next'] in first
         css_text = (folder/'files'/manifest['urls'][url+'site.css']).read_text()
@@ -80,8 +109,25 @@ def test_real_rendered_capture(tmp_path, monkeypatch, store_scripts):
             page.route('https://**/*', lambda route: route.abort())
             page.goto((folder/'index.html').as_uri())
             assert page.locator('h1').inner_text() == 'Rendered by JavaScript'
+            assert page.locator('h1').evaluate('(el) => getComputedStyle(el).borderTopWidth') == '3px'
+            assert page.locator('#lazy').evaluate('(img) => img.complete && img.naturalWidth > 0')
+            assert page.locator('#deep').evaluate('(img) => img.complete && img.naturalWidth > 0')
             page.get_by_role('link', name='Next').click()
             assert page.locator('h1').inner_text() == 'Second page'
             browser.close()
+        if store_scripts:
+            from turboweb.discovery import DiscoveryService
+            discovery = DiscoveryService(manager)
+            result = discovery.create(url, limit=2, depth=1)
+            deadline = time.monotonic() + 25
+            while time.monotonic() < deadline:
+                result = discovery.snapshot(result['id'])
+                if result['status'] not in ('queued','running'):
+                    break
+                time.sleep(.1)
+            assert result['status'] == 'completed', result
+            assert result['sitemap_count'] == 3
+            assert result['discovered'] >= 3
+            assert result['inspected'] <= 2
     finally:
         server.shutdown()

@@ -68,3 +68,32 @@ def test_export_and_archive_isolation(client, app):
 def test_unknown_project(client):
     assert client.post('/api/projects/missing/cancel', json={}).status_code == 404
     assert client.get('/api/projects/missing/export').status_code == 404
+
+
+def test_storage_locations(client, app):
+    root = app.extensions['archives'].root
+    app.extensions['archives'].jobs['abc'] = dict(id='abc',created=0)
+    assert client.get('/api/settings').json['storage_root'] == str(root)
+    project = client.get('/api/projects').json[0]
+    assert project['storage_path'] == str(root/'abc')
+    assert project['files_path'] == str(root/'abc'/'files')
+
+
+@pytest.mark.parametrize('body', [None, [], {'url':'file:///etc/passwd'}, {'url':'https://example.com','limit':101}, {'url':'https://example.com','depth':True}])
+def test_scan_validation(client, body):
+    assert client.post('/api/scans', json=body, content_type='application/json').status_code == 400
+
+
+def test_scan_api(client, app, monkeypatch):
+    service = app.extensions['discovery']
+    monkeypatch.setattr(service, 'create', lambda *a: dict(id='scan', status='queued', url=a[0]))
+    assert client.post('/api/scans', json={'url':'https://example.com'}).status_code == 202
+    assert client.get('/api/scans/missing').status_code == 404
+    assert client.post('/api/scans/missing/cancel', json={}).status_code == 404
+
+
+def test_export_missing_entry_is_clear(client, app):
+    app.extensions['archives'].jobs['abc'] = dict(id='abc',status='completed',entry='missing.html')
+    response = client.get('/api/projects/abc/export')
+    assert response.status_code == 409
+    assert 'missing' in response.json['error']

@@ -14,11 +14,13 @@ from urllib.parse import urljoin, urlsplit, urldefrag
 from bs4 import BeautifulSoup
 
 from .browser import launch_browser
+from .capture_tools import (prepare_page, html_resources,
+                            fetch_resource, srcset_items, css_dependencies, snapshot_html, RESOURCE_LIMIT, TOTAL_LIMIT)
 
 ASSET_TYPES = {'stylesheet': 'styles', 'script': 'scripts', 'image': 'images', 'font': 'fonts', 'media': 'media'}
 DEFAULTS = dict(max_pages=25, depth=2, delay=500, timeout=30000, images=True,
                 styles=True, scripts=True, fonts=True, media=False, beautify=True,
-                run_scripts=False, respect_robots=True)
+                run_scripts=False, respect_robots=True, use_sitemap=True)
 
 
 def normalize_url(url):
@@ -71,13 +73,14 @@ def rewrite_html(html, base, mapping, options):
         if el.get('http-equiv', '').lower() in ('content-security-policy', 'refresh'):
             el.decompose()
     for el in soup.find_all(True):
-        for attr in ('href', 'src', 'poster', 'action', 'data-src'):
+        for attr in ('href', 'src', 'poster', 'action', 'data-src', 'data-original', 'data-lazy-src', 'xlink:href'):
             if el.has_attr(attr):
                 el[attr] = local_ref(el[attr], base, mapping)
         for attr in ('integrity', 'crossorigin', 'nonce'):
             el.attrs.pop(attr, None)
-        if el.has_attr('srcset') and not el['srcset'].lstrip().startswith('data:'):
-            el['srcset'] = ', '.join(' '.join([local_ref(p.split()[0], base, mapping), *p.split()[1:]]) for p in el['srcset'].split(',') if p.split())
+        for attr in ('srcset', 'data-srcset'):
+            if el.has_attr(attr):
+                el[attr] = ', '.join(local_ref(url, base, mapping) + (' ' + desc if desc else '') for url, desc in srcset_items(el[attr]))
         if el.has_attr('style'):
             el['style'] = rewrite_css(el['style'], base, mapping)
         if not options['run_scripts']:
@@ -94,7 +97,7 @@ def rewrite_html(html, base, mapping, options):
 
 class ArchiveManager:
     def __init__(self, root):
-        self.root = Path(root)
+        self.root = Path(root).expanduser().resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.lock = threading.RLock()
         self.jobs = {}
@@ -134,7 +137,7 @@ class ArchiveManager:
         ident = uuid.uuid4().hex[:12]
         job = dict(id=ident, name=name, url=url, options=options, status='queued',
                    created=time.time(), pages=0, assets=0, bytes=0, failed=0, logs=[],
-                   message='Waiting for browser…', entry=None)
+                   message='Waiting for browser…', entry=None, failed_assets=0, discovered=1)
         with self.lock:
             self.jobs[ident] = job
             self.cancel_events[ident] = threading.Event()
@@ -152,7 +155,7 @@ class ArchiveManager:
             try:
                 self.capture(job, event)
                 status = 'cancelled' if event.is_set() else ('completed' if job['pages'] else 'failed')
-                self.update(job, status=status, message='Capture stopped; partial archive retained.' if event.is_set() else ('Archive ready to explore.' if job['pages'] else 'No pages could be captured. See the activity log.'))
+                self.update(job, status=status, message='Capture stopped; partial archive retained.' if event.is_set() else (f"Archive ready: {job['pages']} pages saved, {job['failed']} page failures and {job.get('failed_assets', 0)} resource failures." if job['pages'] else 'No pages could be captured. See the activity log.'))
             except Exception as exc:
                 self.log(job, str(exc), 'error')
                 self.update(job, status='failed', message='Capture failed. See the activity log for details.')
@@ -163,7 +166,7 @@ class ArchiveManager:
     def capture(self, job, event):
         from playwright.sync_api import sync_playwright
         from urllib.robotparser import RobotFileParser
-        options = job['options']
+        options = {**DEFAULTS, **job['options']}
         folder = self.root / job['id'] / 'files'
         folder.mkdir(exist_ok=True)
         mapping, assets, pages = {}, {}, []
@@ -171,6 +174,7 @@ class ArchiveManager:
         seen = set()
         origin = urlsplit(job['url']).netloc
         robots = None
+        robots_text = ''
         with sync_playwright() as p:
             browser, browser_label = launch_browser(p)
             self.log(job, 'Capture browser: ' + browser_label)
@@ -200,7 +204,8 @@ class ArchiveManager:
                     response = page.goto(robots_url, wait_until='domcontentloaded')
                     if response and response.ok:
                         robots = RobotFileParser()
-                        robots.parse(response.text().splitlines())
+                        robots_text = response.text()
+                        robots.parse(robots_text.splitlines())
                     elif response and response.status in (401, 403):
                         raise ValueError('robots.txt access denied; capture stopped to respect site policy.')
                 except ValueError:
@@ -208,34 +213,60 @@ class ArchiveManager:
                 except Exception as exc:
                     self.log(job, 'Could not read robots.txt: ' + str(exc)[:160], 'warning')
 
+            if options['use_sitemap'] and options['depth'] > 0:
+                from .discovery import sitemap_urls
+                links, warnings, bounded = sitemap_urls(context, job['url'], public_url, robots_text, event)
+                for link in links:
+                    if link != job['url']:
+                        queue.append((link, 1))
+                self.update(job, discovered=len(set(links) | {job['url']}))
+                self.log(job, f'Sitemap discovery: {len(links)} URLs' + (' (bounded)' if bounded else ''))
+                for warning in warnings[:5]:
+                    self.log(job, warning, 'warning')
+            scheduled = {url for url, _ in queue}
+            discovered = set(scheduled)
             total = [0]
-            def response_received(response):
-                if event.is_set() or response.request.resource_type not in ASSET_TYPES or not response.ok:
+            missing = {}
+            def store_asset(url, mime, body, aliases=()):
+                if url in assets:
+                    for alias in aliases:
+                        mapping[alias] = mapping[url]
                     return
-                category = ASSET_TYPES[response.request.resource_type]
-                if not options[category]:
+                if len(body) > RESOURCE_LIMIT or total[0] + len(body) > TOTAL_LIMIT:
+                    raise ValueError('Resource size budget exceeded')
+                if 'text/html' in mime:
+                    raise ValueError('Expected a resource, received an HTML page')
+                filename = file_name(url, mime)
+                (folder / filename).write_bytes(body)
+                assets[url] = (filename, mime)
+                mapping[url] = filename
+                for alias in aliases:
+                    mapping[alias] = filename
+                missing.pop(url, None)
+                total[0] += len(body)
+                self.update(job, assets=len(assets), bytes=total[0])
+
+            def response_received(response):
+                category = ASSET_TYPES.get(response.request.resource_type)
+                if event.is_set() or not category or not options[category]:
                     return
                 url = urldefrag(response.url)[0]
                 if url in assets:
                     return
+                missing[url] = category
+                if not response.ok:
+                    return
                 try:
-                    # Avoid accidentally filling the disk with large streaming responses.
-                    if int(response.headers.get('content-length', 0)) > 25 * 1024 * 1024:
-                        self.log(job, 'Skipped large resource: ' + url, 'warning')
-                        return
-                    body = response.body()
-                    if len(body) > 25 * 1024 * 1024 or total[0] + len(body) > 500 * 1024 * 1024:
-                        self.log(job, 'Resource size budget exceeded: ' + url, 'warning')
-                        return
-                    mime = response.headers.get('content-type', '')
-                    filename = file_name(url, mime)
-                    (folder / filename).write_bytes(body)
-                    assets[url] = (filename, mime)
-                    mapping[url] = filename
-                    total[0] += len(body)
-                    self.update(job, assets=len(assets), bytes=total[0])
+                    if int(response.headers.get('content-length', 0)) > RESOURCE_LIMIT:
+                        raise ValueError('Resource exceeds 25 MB')
+                    aliases = []
+                    request = response.request.redirected_from
+                    while request:
+                        aliases.append(urldefrag(request.url)[0])
+                        request = request.redirected_from
+                    store_asset(url, response.headers.get('content-type', ''), response.body(), aliases)
                 except Exception as exc:
-                    self.log(job, 'Resource unavailable: ' + url + ' — ' + str(exc)[:100], 'warning')
+                    self.log(job, 'Resource queued for recovery: ' + url + ' — ' + str(exc)[:100], 'warning')
             page.on('response', response_received)
             try:
                 while queue and len(pages) < options['max_pages'] and not event.is_set():
@@ -249,27 +280,40 @@ class ArchiveManager:
                     self.update(job, message='Rendering ' + url)
                     self.log(job, 'Rendering ' + url)
                     try:
-                        response = page.goto(url, wait_until='domcontentloaded')
-                        if response and response.status >= 400:
-                            raise ValueError('HTTP ' + str(response.status))
+                        response = None
+                        for attempt in range(3):
+                            try:
+                                response = page.goto(url, wait_until='domcontentloaded')
+                                if response and response.status >= 400:
+                                    if response.status != 429 and response.status < 500:
+                                        raise ValueError('HTTP ' + str(response.status))
+                                    raise OSError('HTTP ' + str(response.status))
+                                break
+                            except ValueError:
+                                raise
+                            except Exception:
+                                if attempt == 2 or event.is_set():
+                                    raise
+                                page.wait_for_timeout(500 * (attempt + 1))
+                        if response and 'text/html' not in response.headers.get('content-type', 'text/html'):
+                            self.log(job, 'Skipped non-HTML page: ' + url, 'warning')
+                            continue
                         try:
                             page.wait_for_load_state('networkidle', timeout=min(5000, options['timeout']))
                         except Exception:
                             pass
-                        # Trigger common lazy loading without an unbounded infinite scroll.
-                        for _ in range(4):
-                            if event.is_set():
-                                break
-                            page.evaluate('window.scrollBy(0, window.innerHeight)')
-                            page.wait_for_timeout(180)
-                        page.evaluate('window.scrollTo(0, 0)')
+                        reached_bottom = prepare_page(page, event)
+                        if not reached_bottom:
+                            self.log(job, 'Scroll budget reached; infinite or very long content may be partial.', 'warning')
                         page.wait_for_timeout(options['delay'])
                         final_url = normalize_url(page.url)
+                        if not pages and url == job['url']:
+                            origin = urlsplit(final_url).netloc
                         if urlsplit(final_url).netloc != origin:
                             self.log(job, 'Skipped page redirected outside the target site.', 'warning')
                             continue
                         base = page.evaluate('document.baseURI')
-                        html = page.content()
+                        html = snapshot_html(page)
                         filename = file_name(url, page=True)
                         mapping[url] = filename
                         mapping[final_url] = filename
@@ -285,13 +329,55 @@ class ArchiveManager:
                             for href in page.locator('a[href]').evaluate_all('(nodes) => nodes.map(n => n.href)'):
                                 try:
                                     link = normalize_url(href)
-                                    if urlsplit(link).netloc == origin and link not in seen and len(queue) < 3000:
-                                        queue.append((link, depth + 1))
+                                    if urlsplit(link).netloc == origin:
+                                        if len(discovered) < 10000:
+                                            discovered.add(link)
+                                        if link not in scheduled and len(queue) < 10000:
+                                            scheduled.add(link)
+                                            queue.append((link, depth + 1))
                                 except ValueError:
                                     pass
+                            self.update(job, discovered=len(discovered))
                     except Exception as exc:
                         self.update(job, failed=job['failed'] + 1)
                         self.log(job, 'Page failed: ' + url + ' — ' + str(exc)[:220], 'error')
+                # Recover resources never requested by the browser (responsive variants,
+                # lazy attributes, CSS imports/fonts/backgrounds), plus failed responses.
+                self.update(job, message='Recovering images and dependent resources…')
+                pending = deque((url, category, job['url']) for url, category in missing.items())
+                for _, base, _, html in pages:
+                    pending.extend((url, category, base) for url, category in html_resources(html, base))
+                expanded_css = set()
+                attempted = set()
+                failures = []
+                while (pending or any('css' in mime and url not in expanded_css for url, (_, mime) in assets.items())) and not event.is_set():
+                    for url, (filename, mime) in list(assets.items()):
+                        if 'css' in mime and url not in expanded_css:
+                            expanded_css.add(url)
+                            text = (folder / filename).read_text('utf-8', errors='replace')
+                            pending.extend((urljoin(url, ref), category, url) for ref, category in css_dependencies(text))
+                    if not pending:
+                        break
+                    url, category, referer = pending.popleft()
+                    url = urldefrag(url)[0]
+                    if url in mapping or url in attempted or not options[category] or urlsplit(url).scheme not in ('http','https'):
+                        continue
+                    if len(attempted) >= 5000:
+                        self.log(job, 'Resource recovery capped at 5000 URLs.', 'warning')
+                        break
+                    attempted.add(url)
+                    try:
+                        final, mime, body = fetch_resource(context, url, public_url, referer=referer, timeout=min(options['timeout'],15000))
+                        # Avoid misclassifying extensionless imported CSS/font resources.
+                        actual = ('styles' if 'css' in mime else 'fonts' if 'font' in mime else
+                                  'scripts' if 'javascript' in mime else 'images' if mime.startswith('image/') else category)
+                        if options[actual]:
+                            store_asset(final, mime, body, [url])
+                    except Exception as exc:
+                        failures.append(dict(url=url, reason=str(exc)[:250]))
+                        self.log(job, 'Resource failed after retries: ' + url + ' — ' + str(exc)[:120], 'warning')
+                (folder.parent / 'missing-resources.json').write_text(json.dumps(failures, indent=2), encoding='utf-8')
+                self.update(job, failed_assets=len(failures))
                 self.update(job, message='Rewriting links and formatting source…')
                 for url, base, filename, html in pages:
                     (folder / filename).write_text(rewrite_html(html, base, mapping, options), encoding='utf-8')
@@ -313,6 +399,6 @@ class ArchiveManager:
                 if job['entry']:
                     (folder.parent / 'index.html').write_text('<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="0;url=files/' + job['entry'] + '"><title>Offline archive</title><a href="files/' + job['entry'] + '">Open archive</a>', encoding='utf-8')
                 self.update(job, bytes=sum(f.stat().st_size for f in folder.iterdir() if f.is_file()))
-                self.log(job, f'Captured {len(pages)} pages and {len(assets)} resources. Links outside the capture remain online.', 'success')
+                self.log(job, f'Captured {len(pages)} pages and {len(assets)} resources; {len(failures)} resources failed. Links outside the capture remain online.', 'success')
             finally:
                 browser.close()

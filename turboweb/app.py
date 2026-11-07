@@ -1,12 +1,12 @@
 import copy
-import io
 import os
-import zipfile
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from flask import Flask, abort, jsonify, render_template, request, send_file, send_from_directory
 from .engine import ArchiveManager, DEFAULTS, normalize_url
+from .exports import build_export
+from .discovery import DiscoveryService
 
 
 def create_app(data_dir=None):
@@ -14,7 +14,10 @@ def create_app(data_dir=None):
     app.config['MAX_CONTENT_LENGTH'] = 32 * 1024
     root = Path(data_dir or os.environ.get('TURBOWEB_DATA', Path.home() / '.turbowebdownloader'))
     manager = ArchiveManager(root)
+    root = manager.root
     app.extensions['archives'] = manager
+    discovery = DiscoveryService(manager)
+    app.extensions['discovery'] = discovery
 
     @app.before_request
     def protect_mutations():
@@ -41,11 +44,17 @@ def create_app(data_dir=None):
     @app.get('/api/projects')
     def projects():
         with manager.lock:
-            return jsonify(sorted(copy.deepcopy(list(manager.jobs.values())), key=lambda p: p['created'], reverse=True))
+            result = copy.deepcopy(list(manager.jobs.values()))
+            for job in result:
+                job['storage_path'] = str(root / job['id'])
+                job['files_path'] = str(root / job['id'] / 'files')
+            return jsonify(sorted(result, key=lambda p: p['created'], reverse=True))
 
     @app.post('/api/projects')
     def create():
         data = request.get_json(silent=True) or {}
+        if not isinstance(data, dict):
+            return jsonify(error='Expected a JSON object.'), 400
         try:
             name = str(data.get('name', '')).strip()[:80]
             if not name:
@@ -72,7 +81,10 @@ def create_app(data_dir=None):
                 if sum(j['status'] in ('queued', 'running', 'stopping') for j in manager.jobs.values()) >= 5:
                     return jsonify(error='The queue is full. Wait for a capture to finish.'), 409
             job = manager.create(name, url, options)
-            return jsonify(copy.deepcopy(job)), 201
+            result = copy.deepcopy(job)
+            result['storage_path'] = str(root / job['id'])
+            result['files_path'] = str(root / job['id'] / 'files')
+            return jsonify(result), 201
         except (ValueError, TypeError) as exc:
             return jsonify(error=str(exc)), 400
 
@@ -98,15 +110,52 @@ def create_app(data_dir=None):
     @app.get('/api/projects/<ident>/export')
     def export(ident):
         job = get_job(ident)
-        if job['status'] in ('queued', 'running', 'stopping') or not job['entry']:
-            return jsonify(error='Wait for a finished capture before exporting.'), 409
-        buffer = io.BytesIO()
-        with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED) as archive:
-            for file in (root / ident).rglob('*'):
-                if file.is_file() and file.name != 'project.json':
-                    archive.write(file, file.relative_to(root / ident))
-            archive.writestr('READ ME.txt', 'TurboWebDownloader offline archive\nOpen index.html in a browser. For best compatibility, serve this folder with: python -m http.server 8080\nOnly captured pages and resources work offline. Forms, APIs, logins and uncaptured links may require the original website.\n')
-        buffer.seek(0)
-        return send_file(buffer, mimetype='application/zip', as_attachment=True, download_name='TurboWebDownloader-' + ident + '.zip')
+        try:
+            path = build_export(root, job)
+            return send_file(path, mimetype='application/zip', as_attachment=True,
+                             download_name='TurboWebDownloader-' + ident + '.zip', conditional=True)
+        except ValueError as exc:
+            return jsonify(error=str(exc)), 409
+        except OSError as exc:
+            return jsonify(error='Could not create ZIP: ' + str(exc)), 500
+
+    @app.get('/api/settings')
+    def settings():
+        return jsonify(storage_root=str(root), export_cache=str(root / '.exports'), native_desktop=app.config.get('NATIVE_DESKTOP', False))
+
+    @app.post('/api/scans')
+    def scan():
+        data = request.get_json(silent=True)
+        try:
+            if not isinstance(data, dict):
+                raise ValueError('Expected a JSON object.')
+            url = normalize_url(str(data.get('url', '')))
+            limit = data.get('limit', 50)
+            depth = data.get('depth', 3)
+            respect = data.get('respect_robots', True)
+            if type(limit) is not int or not 1 <= limit <= 100:
+                raise ValueError('Analysis page limit must be between 1 and 100.')
+            if type(depth) is not int or not 0 <= depth <= 10:
+                raise ValueError('Analysis depth must be between 0 and 10.')
+            if not isinstance(respect, bool):
+                raise ValueError('Invalid robots policy.')
+            return jsonify(discovery.create(url, limit, depth, respect)), 202
+        except ValueError as exc:
+            return jsonify(error=str(exc)), 400
+
+    @app.get('/api/scans/<ident>')
+    def scan_status(ident):
+        try:
+            return jsonify(discovery.snapshot(ident))
+        except KeyError:
+            abort(404)
+
+    @app.post('/api/scans/<ident>/cancel')
+    def scan_cancel(ident):
+        with discovery.lock:
+            if ident not in discovery.tasks:
+                abort(404)
+            discovery.tasks[ident]['event'].set()
+        return jsonify(ok=True)
 
     return app

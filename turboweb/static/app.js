@@ -8,12 +8,70 @@ const active = p => ['queued','running','stopping'].includes(p.status);
 let projects = [], filter = 'all', step = 0, detailId = null, fetching = false, initialLoad = true;
 let preferences = {max_pages:25, depth:2, delay:500, beautify:true, respect_robots:true};
 try { preferences = {...preferences, ...JSON.parse(localStorage.getItem('turbo-preferences') || '{}')}; } catch (_) {}
-let toastTimer;
+let toastTimer, scanTimer, scanResult = null, scanGeneration = 0;
+let storageRoot = '', nativeDesktop = false;
+const exporting = new Set();
+api('/api/settings').then(s => { storageRoot = s.storage_root; nativeDesktop = s.native_desktop; }).catch(() => {});
 function toast(text) { $('#toast').textContent = text; $('#toast').classList.add('visible'); clearTimeout(toastTimer); toastTimer = setTimeout(() => $('#toast').classList.remove('visible'), 4000); }
 async function api(url, data) {
   const response = await fetch(url, data === undefined ? {} : {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data)});
   if (!response.ok) { let error; try { error = (await response.json()).error; } catch (_) {} throw new Error(error || `Request failed (${response.status}).`); }
   return response.json();
+}
+async function exportProject(project) {
+  if(exporting.has(project.id)) return;
+  exporting.add(project.id); renderDetail();
+  try {
+    if(nativeDesktop && !window.pywebview?.api?.export_project) throw new Error('Native Save As is not ready. Restart the updated desktop application.');
+    if(window.pywebview?.api?.export_project) {
+      const result = await window.pywebview.api.export_project(project.id);
+      if(result.error) throw new Error(result.error);
+      if(result.path) { project.last_export_path = result.path; toast('ZIP saved: ' + result.path); }
+      return;
+    }
+    // Check failures before handing a disk-backed download to the browser.
+    const response = await fetch(`/api/projects/${project.id}/export`, {method:'HEAD'});
+    if(!response.ok) throw new Error('ZIP could not be created. Check that the archive exists and capture has finished.');
+    const link = document.createElement('a');
+    link.href = `/api/projects/${project.id}/export`; link.download = `TurboWebDownloader-${project.id}.zip`;
+    document.body.appendChild(link); link.click(); link.remove();
+    toast('Download requested. The ZIP uses your browser download folder or Save As setting.');
+  } catch(error) { toast(error.message); }
+  finally { exporting.delete(project.id); if($('#details').open) renderDetail(); }
+}
+function renderScan() {
+  const el = $('#scan-summary'); if(!el) return;
+  if(step === 2) renderReview();
+  const running = scanResult && ['queued','running'].includes(scanResult.status);
+  $('#scan-stop').hidden = !running;
+  $('#scan-use').hidden = !scanResult || scanResult.status === 'failed';
+  el.innerHTML = scanResult ? `<strong>${scanResult.discovered} known page URLs</strong><span>${scanResult.sitemap_count} in sitemaps · ${scanResult.inspected} pages inspected · ${esc(scanResult.status)}</span><p>${esc(scanResult.message)}</p>${scanResult.warnings?.length ? `<small>${scanResult.warnings.length} warnings. Some pages or sitemaps could not be read.</small>` : ''}` : 'Analyze the site to discover URLs before choosing a page limit.';
+}
+function stopScan() {
+  clearTimeout(scanTimer); scanGeneration++;
+  if(scanResult && ['queued','running'].includes(scanResult.status)) {
+    api(`/api/scans/${scanResult.id}/cancel`, {}).catch(() => {});
+    scanResult.status = 'cancelled'; scanResult.message = 'Stopped; discovered count is partial.'; renderScan();
+  }
+}
+async function startScan() {
+  stopScan(); const generation = scanGeneration;
+  $('#scan-summary').textContent = 'Starting site analysis…';
+  const url = $('#project-url').value.trim();
+  try {
+    const result = await api('/api/scans', {url, limit:Number($('#scan-limit').value), depth:3, respect_robots:$('#project-form [name="respect_robots"]').checked});
+    if(generation !== scanGeneration) { api(`/api/scans/${result.id}/cancel`, {}).catch(() => {}); return; }
+    scanResult = result; renderScan();
+    const poll = async () => {
+      try {
+        const current = await api(`/api/scans/${result.id}`);
+        if(generation !== scanGeneration) return;
+        scanResult = current; renderScan();
+        if(['queued','running'].includes(current.status)) scanTimer = setTimeout(poll, 1000);
+      } catch(error) { if(generation === scanGeneration) { scanResult.status='failed'; scanResult.message=error.message; renderScan(); } }
+    };
+    if(['queued','running'].includes(result.status)) scanTimer = setTimeout(poll, 500);
+  } catch(error) { if(generation === scanGeneration) $('#scan-summary').textContent = 'Analysis unavailable: ' + error.message; }
 }
 function changeFilter(value) {
   filter = value;
@@ -49,6 +107,7 @@ async function refresh() {
   finally { fetching = false; }
 }
 function openWizard(project = null) {
+  stopScan(); scanResult = null; renderScan();
   $('#project-form').reset(); $('#form-error').textContent = ''; step = 0;
   const settings = project ? project.options : preferences;
   for (const [key,value] of Object.entries(settings)) { const field = $(`[name="${key}"]`, $('#project-form')); if(field) { if(field.type === 'checkbox') field.checked = value; else field.value = value; } }
@@ -75,10 +134,11 @@ function updateStep() {
   $('#wizard-back').textContent=step===0?'Cancel':'Back';
   $('#wizard-next').innerHTML=step===2?`${icon('download')} Start capture`:'Continue <span>→</span>';
   $('#form-error').textContent='';
-  if(step===2) { const v=values(); $('#review').innerHTML=`<h3>${esc(v.name)}</h3><p>${esc(v.url)}</p><div class="review-chips"><span>Up to ${v.options.max_pages} pages</span><span>Depth ${v.options.depth}</span><span>${v.options.delay}ms render wait</span>${['styles','images','fonts','scripts','media'].filter(k=>v.options[k]).map(k=>`<span>${k}</span>`).join('')}<span>${v.options.run_scripts?'Scripts enabled':'Static rendered snapshot'}</span></div>`; }
+  if(step===2) renderReview();
 }
+function renderReview() { const v=values(); $('#review').innerHTML=`<h3>${esc(v.name)}</h3><p>${esc(v.url)}</p><div class="review-chips"><span>Up to ${v.options.max_pages} pages</span><span>${scanResult ? `${scanResult.discovered} known URLs (${esc(scanResult.status)})` : 'Site total unknown — not analyzed'}</span><span>Depth ${v.options.depth}</span><span>${v.options.delay}ms render wait</span>${['styles','images','fonts','scripts','media'].filter(k=>v.options[k]).map(k=>`<span>${k}</span>`).join('')}<span>${v.options.run_scripts?'Scripts enabled':'Static rendered snapshot'}</span></div>`; }
 async function nextStep() {
-  if(step<2) { if(validateStep()) { step++; updateStep(); } return; }
+  if(step<2) { if(validateStep()) { step++; updateStep(); if(step===1) startScan(); } return; }
   if(!$('#permission').checked) { $('#form-error').textContent='Please confirm you have permission to archive this website.'; return; }
   $('#wizard-next').disabled=true;
   try { const project=await api('/api/projects',values()); $('#wizard').close(); projects.unshift(project); render(); openDetail(project.id); toast('Project created. Your browser is getting ready.'); }
@@ -90,17 +150,20 @@ function renderDetail() {
   const p=projects.find(p=>p.id===detailId); if(!p) return;
   const previousLog=$('.activity-log'), oldScroll=previousLog?.scrollTop || 0;
   const follow=!previousLog || previousLog.scrollHeight-previousLog.scrollTop-previousLog.clientHeight<40;
-  $('#detail-content').innerHTML=`<div class="detail-main"><div class="detail-title"><h2>${esc(p.name)}</h2><span class="status ${p.status}">${esc(p.status)}</span></div><div class="detail-url">${esc(p.url)}</div><div class="detail-stats"><div><strong>${p.pages}</strong><small>PAGES</small></div><div><strong>${p.assets}</strong><small>RESOURCES</small></div><div><strong>${bytes(p.bytes)}</strong><small>ARCHIVE SIZE</small></div><div><strong>${p.failed}</strong><small>FAILED PAGES</small></div></div><div class="capture-message">${esc(p.message)}</div><div class="detail-actions">${active(p)?`<button class="secondary" id="cancel-capture" ${p.status==='stopping'?'disabled':''}>Stop capture</button>`:`${p.entry?`<a class="primary" target="_blank" rel="noopener" href="/archive/${p.id}/index.html">${icon('globe')} Browse offline</a><a class="secondary" href="/api/projects/${p.id}/export">Export ZIP ↓</a>`:''}<button class="secondary" id="retry-capture">Capture again</button>`}</div>${p.entry?`<img class="preview-image" src="/archive/${p.id}/preview.png" alt="First captured page" onerror="this.hidden=true">`:''}<h4 class="log-heading">CAPTURE ACTIVITY</h4><div class="activity-log" aria-label="Capture activity">${p.logs.length?p.logs.map(l=>`<div class="${esc(l.level)}"><time>${esc(l.time)}</time>${esc(l.message)}</div>`).join(''):'Waiting for the browser…'}</div><p class="preference-note">Only captured links work offline. External and uncaptured links still point to the live web. Partial archives may be exported after stopping.</p></div>`;
+  $('#detail-content').innerHTML=`<div class="detail-main"><div class="detail-title"><h2>${esc(p.name)}</h2><span class="status ${p.status}">${esc(p.status)}</span></div><div class="detail-url">${esc(p.url)}</div><div class="detail-stats"><div><strong>${p.pages}</strong><small>PAGES</small></div><div><strong>${p.assets}</strong><small>RESOURCES</small></div><div><strong>${bytes(p.bytes)}</strong><small>ARCHIVE SIZE</small></div><div><strong>${p.failed}</strong><small>FAILED PAGES</small></div></div><div class="capture-message">${esc(p.message)}</div><div class="project-location"><strong>Saved on this device</strong><code>${esc(p.storage_path || storageRoot + '/' + p.id)}</code><span>Pages & resources: <code>${esc(p.files_path || (p.storage_path || storageRoot + '/' + p.id) + '/files')}</code></span><div><button class="text-button" id="copy-location">Copy path</button><button class="text-button" id="open-location" ${window.pywebview?.api?'':'hidden'}>Open folder ↗</button></div>${p.last_export_path?`<span>Last ZIP export: <code>${esc(p.last_export_path)}</code></span>`:''}<small>${p.discovered ?? p.pages} known page URLs · ${p.failed_assets || 0} failed resources. Details: missing-resources.json</small></div><div class="detail-actions">${active(p)?`<button class="secondary" id="cancel-capture" ${p.status==='stopping'?'disabled':''}>Stop capture</button>`:`${p.entry?`<a class="primary" target="_blank" rel="noopener" href="/archive/${p.id}/index.html">${icon('globe')} Browse offline</a><button class="secondary" id="export-zip" ${exporting.has(p.id)?'disabled':''}>${exporting.has(p.id)?'Preparing ZIP…':'Save as ZIP ↓'}</button>`:''}<button class="secondary" id="retry-capture">Capture again</button>`}</div>${p.entry?`<img class="preview-image" src="/archive/${p.id}/preview.png" alt="First captured page" onerror="this.hidden=true">`:''}<h4 class="log-heading">CAPTURE ACTIVITY</h4><div class="activity-log" aria-label="Capture activity">${p.logs.length?p.logs.map(l=>`<div class="${esc(l.level)}"><time>${esc(l.time)}</time>${esc(l.message)}</div>`).join(''):'Waiting for the browser…'}</div><p class="preference-note">Only captured links work offline. External and uncaptured links still point to the live web. Partial archives may be exported after stopping.</p></div>`;
   const log=$('.activity-log'); log.scrollTop=follow?log.scrollHeight:oldScroll;
+  $('#export-zip')?.addEventListener('click', () => exportProject(p));
+  $('#copy-location')?.addEventListener('click', async () => { try { await navigator.clipboard.writeText(p.storage_path || storageRoot + '/' + p.id); toast('Project path copied.'); } catch (_) { toast('Copy the displayed path manually.'); } });
+  $('#open-location')?.addEventListener('click', async () => { try { const result = await window.pywebview.api.open_project_folder(p.id); if(result.error) throw new Error(result.error); } catch(e) { toast(e.message); } });
   $('#cancel-capture')?.addEventListener('click',async()=>{ try { await api(`/api/projects/${p.id}/cancel`,{}); await refresh(); } catch(e) { toast(e.message); } });
   $('#retry-capture')?.addEventListener('click',()=>{$('#details').close();openWizard(p);});
 }
 function showInformation(type) {
   $('#info-label').textContent=type.toUpperCase();
   let html='';
-  if(type==='about') html=`<img class="about-logo" src="/static/logo.svg" alt="TurboWebDownloader logo"><h2>TurboWebDownloader</h2><span class="version">VERSION 1.0.0 · GPL-3.0</span><p>Your web, offline. A local-first, browser-powered archiver built to make the useful corners of the web a little more permanent.</p><div class="author-box"><small>Designed & developed by</small><strong>behnam ehsani</strong><a href="mailto:inbox.ehsani@gmail.com">inbox.ehsani@gmail.com ↗</a><a href="https://github.com/wrappedman/TurboWebDownloader" target="_blank" rel="noopener">github.com/wrappedman/TurboWebDownloader ↗</a></div><p>Built with Python, Playwright and a little love for the open web. Your data stays on this device.</p>`;
+  if(type==='about') html=`<img class="about-logo" src="/static/logo.svg" alt="TurboWebDownloader logo"><h2>TurboWebDownloader</h2><span class="version">VERSION 1.1.0 · GPL-3.0</span><p>Your web, offline. A local-first, browser-powered archiver built to make the useful corners of the web a little more permanent.</p><div class="author-box"><small>Designed & developed by</small><strong>behnam ehsani</strong><a href="mailto:inbox.ehsani@gmail.com">inbox.ehsani@gmail.com ↗</a><a href="https://github.com/wrappedman/TurboWebDownloader" target="_blank" rel="noopener">github.com/wrappedman/TurboWebDownloader ↗</a></div><p>Built with Python, Playwright and a little love for the open web. Your data stays on this device.</p>`;
   else if(type==='help') html=`<h2>Bring a piece of the web home.</h2><ol class="help-list"><li><strong>Create a project.</strong> Enter a public website URL and a friendly name.</li><li><strong>Choose the scope.</strong> Depth 0 captures one page. Higher depths follow links on the same domain, up to your page limit.</li><li><strong>Watch the capture.</strong> Chromium renders each page, collects selected resources, and rewrites captured links.</li><li><strong>Browse or export.</strong> Open the archive locally, or export a ZIP to take it with you.</li></ol><div class="info-box warning"><p>Not a server clone: login sessions, server-side search, forms, streaming media and API-driven interactions cannot be guaranteed. Static snapshot mode preserves rendered DOM but disables scripts to avoid rehydration changes. Missing resources and uncaptured links may still require internet.</p></div><p>Archive responsibly. Follow website terms, copyright rules and robots.txt. Public websites only; private network addresses are blocked.</p>`;
-  else html=`<h2>Your workspace, your defaults.</h2><p>These settings are used for new projects. Existing projects are not affected.</p><form id="preferences-form"><div class="field-row"><label class="field">Page limit<input name="max_pages" type="number" min="1" max="500" value="${Number(preferences.max_pages)}" required></label><label class="field">Link depth<input name="depth" type="number" min="0" max="10" value="${Number(preferences.depth)}" required></label><label class="field">Wait (ms)<input name="delay" type="number" min="0" max="10000" value="${Number(preferences.delay)}" required></label></div><label class="toggle-row"><div><strong>Format source files</strong><small>Readable HTML, CSS and JavaScript</small></div><input name="beautify" type="checkbox" ${preferences.beautify?'checked':''}></label><label class="toggle-row"><div><strong>Respect robots.txt</strong><small>Honor site crawl policies</small></div><input name="respect_robots" type="checkbox" ${preferences.respect_robots?'checked':''}></label><p class="preference-note">Capture viewport: 1440 × 1000 · One capture at a time · Resource limit: 25 MB each / 500 MB total. Archives are stored in your home folder under .turbowebdownloader (or TURBOWEB_DATA).</p><button class="primary" type="submit">Save preferences</button></form>`;
+  else html=`<h2>Your workspace, your defaults.</h2><p>These settings are used for new projects. Existing projects are not affected.</p><form id="preferences-form"><div class="field-row"><label class="field">Page limit<input name="max_pages" type="number" min="1" max="500" value="${Number(preferences.max_pages)}" required></label><label class="field">Link depth<input name="depth" type="number" min="0" max="10" value="${Number(preferences.depth)}" required></label><label class="field">Wait (ms)<input name="delay" type="number" min="0" max="10000" value="${Number(preferences.delay)}" required></label></div><label class="toggle-row"><div><strong>Format source files</strong><small>Readable HTML, CSS and JavaScript</small></div><input name="beautify" type="checkbox" ${preferences.beautify?'checked':''}></label><label class="toggle-row"><div><strong>Respect robots.txt</strong><small>Honor site crawl policies</small></div><input name="respect_robots" type="checkbox" ${preferences.respect_robots?'checked':''}></label><p class="preference-note">Capture viewport: 1440 × 1000 · One capture at a time · Resource limit: 25 MB each / 500 MB total. Storage folder: ${esc(storageRoot || "Loading…")}. Each project has its own folder; ZIPs use your native Save As dialog or the browser download location.</p><button class="primary" type="submit">Save preferences</button></form>`;
   $('#info-content').innerHTML=`<div class="information-body">${html}</div>`;
   $('#preferences-form')?.addEventListener('submit',e=>{e.preventDefault();const form=e.currentTarget;for(const input of $$('input',form))preferences[input.name]=input.type==='checkbox'?input.checked:Number(input.value);try{localStorage.setItem('turbo-preferences',JSON.stringify(preferences));$('#information').close();toast('Preferences saved.');}catch(_){toast('Browser storage unavailable. Defaults saved for this session.');}});
   $('#information').showModal();
@@ -111,6 +174,10 @@ $$('[data-nav]').forEach(b=>b.addEventListener('click',()=>changeFilter(b.datase
 ['about','preferences','help'].forEach(id=>$(`#${id}`).addEventListener('click',()=>showInformation(id)));
 $$('[data-close]').forEach(b=>b.addEventListener('click',()=>b.closest('dialog').close()));
 $$('dialog').forEach(d=>d.addEventListener('click',e=>{if(e.target===d){const r=d.getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)d.close();}}));
+$('#wizard').addEventListener('close', stopScan);
+$('#scan-start').addEventListener('click', startScan);
+$('#scan-stop').addEventListener('click', stopScan);
+$('#scan-use').addEventListener('click', () => { if(scanResult) { $('#project-form [name="max_pages"]').value = Math.min(500, Math.max(1, scanResult.discovered)); toast(scanResult.discovered > 500 ? 'Limit set to the supported maximum of 500 pages.' : 'Page limit updated. Adjust link depth if needed.'); } });
 $('#wizard-back').addEventListener('click',()=>{if(step===0)$('#wizard').close();else{step--;updateStep();}});
 $('#wizard-next').addEventListener('click',nextStep);
 $('#project-form').addEventListener('submit',e=>{e.preventDefault();nextStep();});
