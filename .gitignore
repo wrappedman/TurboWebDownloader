@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+node_modules/
+build/
+dist/
+*.spec
+.pytest_cache/
+.turbo-data/
+
+.cache/

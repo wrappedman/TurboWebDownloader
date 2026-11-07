@@ -1,0 +1,75 @@
+name: Validate and build
+
+on:
+  push:
+    branches: [main, arena/a696d72a-turbowebdownloader]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: Unit, browser and UI tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: pip install -r requirements.txt pytest
+      - run: python -m playwright install --with-deps chromium
+      - name: Run all tests with real Chromium
+        shell: bash
+        run: |
+          export TURBOWEB_TEST_BROWSER="$(python -c 'from playwright.sync_api import sync_playwright; p = sync_playwright().start(); print(p.chromium.executable_path); p.stop()')"
+          mkdir -p build/logs
+          set +e
+          python -m pytest -q --junitxml=build/logs/tests.xml
+          result=$?
+          if [ "$result" -ne 0 ]; then python scripts/report_test_failures.py build/logs/tests.xml; fi
+          exit "$result"
+      - run: node --check turboweb/static/app.js
+      - run: python -m compileall -q turboweb desktop.py run.py
+
+  windows:
+    name: Build Windows desktop distribution
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Validate PowerShell syntax (Windows PowerShell 5.1)
+        shell: powershell
+        run: |
+          foreach ($file in Get-ChildItem scripts/*.ps1) {
+            $parseErrors = $null
+            $tokens = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$tokens, [ref]$parseErrors)
+            if ($parseErrors.Count) { $parseErrors | Format-List; exit 1 }
+          }
+      - name: Build through the same BAT used locally
+        shell: cmd
+        run: build-windows.bat -NoPause -NonInteractive -BrowserMode Bundled
+      - name: Upload portable Windows distribution
+        uses: actions/upload-artifact@v4
+        with:
+          name: TurboWebDownloader-Windows-x64
+          path: dist/TurboWebDownloader/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Windows-build-diagnostics
+          path: build/logs/
+          if-no-files-found: warn
+          retention-days: 14
