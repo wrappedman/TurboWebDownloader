@@ -110,9 +110,9 @@ def test_real_rendered_capture(tmp_path, monkeypatch, store_scripts):
             page.route('https://**/*', lambda route: route.abort())
             page.goto((folder/'index.html').as_uri())
             assert page.locator('h1').inner_text() == 'Rendered by JavaScript'
-            assert page.locator('h1').evaluate('(el) => getComputedStyle(el).borderTopWidth') == '3px'
-            assert page.locator('#lazy').evaluate('(img) => img.complete && img.naturalWidth > 0')
-            assert page.locator('#deep').evaluate('(img) => img.complete && img.naturalWidth > 0')
+            page.wait_for_function("getComputedStyle(document.querySelector('h1')).borderTopWidth === '3px'")
+            page.wait_for_function("document.querySelector('#lazy').complete && document.querySelector('#lazy').naturalWidth > 0")
+            page.wait_for_function("document.querySelector('#deep').complete && document.querySelector('#deep').naturalWidth > 0")
             page.get_by_role('link', name='Next').click()
             assert page.locator('h1').inner_text() == 'Second page'
             browser.close()

@@ -28,7 +28,12 @@ jobs:
         shell: bash
         run: |
           export TURBOWEB_TEST_BROWSER="$(python -c 'from playwright.sync_api import sync_playwright; p = sync_playwright().start(); print(p.chromium.executable_path); p.stop()')"
-          python -m pytest -q
+          mkdir -p build/logs
+          set +e
+          python -m pytest -q --junitxml=build/logs/tests.xml
+          result=$?
+          if [ "$result" -ne 0 ]; then python scripts/report_test_failures.py build/logs/tests.xml; fi
+          exit "$result"
       - run: node --check turboweb/static/app.js
       - run: python -m compileall -q turboweb desktop.py run.py
 

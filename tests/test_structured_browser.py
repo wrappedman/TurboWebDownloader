@@ -84,11 +84,11 @@ def test_nested_website_and_cdn_paths_work_offline(tmp_path, monkeypatch):
             page.route('https://**/*',lambda route:route.abort())
             page.goto((folder/'index.html').as_uri())
             assert page.locator('h1').inner_text() == 'Home'
-            assert page.locator('#logo').evaluate('(img)=>img.complete && img.naturalWidth===12')
+            page.wait_for_function("document.querySelector('#logo').complete && document.querySelector('#logo').naturalWidth === 12")
             page.get_by_role('link',name='Navigate').click()
             assert page.locator('h1').inner_text() == 'Chapter'
-            assert page.locator('h1').evaluate('(el)=>getComputedStyle(el).color') == 'rgb(17, 34, 51)'
-            assert page.locator('#logo').evaluate('(img)=>img.complete && img.naturalWidth===12')
+            page.wait_for_function("getComputedStyle(document.querySelector('h1')).color === 'rgb(17, 34, 51)'")
+            page.wait_for_function("document.querySelector('#logo').complete && document.querySelector('#logo').naturalWidth === 12")
             browser.close()
     finally:
         server.shutdown()
