@@ -102,6 +102,20 @@ def create_app(data_dir=None):
                 manager.update(job, status='stopping', message='Stopping safely…')
         return jsonify(ok=True)
 
+    @app.post('/api/projects/<ident>/delete')
+    def delete_project(ident):
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict) or type(data.get('delete_files')) is not bool:
+            return jsonify(error='Choose whether downloaded files should be deleted.'), 400
+        try:
+            return jsonify(manager.delete(ident, data['delete_files']))
+        except KeyError:
+            abort(404)
+        except ValueError as exc:
+            return jsonify(error=str(exc)), 409
+        except OSError as exc:
+            return jsonify(error='Could not delete project files: ' + str(exc)), 500
+
     @app.get('/archive/<ident>/<path:filename>')
     def archive(ident, filename):
         get_job(ident)

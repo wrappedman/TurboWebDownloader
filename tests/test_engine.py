@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 import socket
 import threading
 
@@ -19,7 +20,7 @@ def test_normalization_and_names():
     assert normalize_url(' https://example.com#hello ') == 'https://example.com/'
     assert file_name('https://example.com/a?q=1', page=True).endswith('.html')
     assert file_name('https://example.com/a?q=1', page=True) != file_name('https://example.com/a?q=2', page=True)
-    assert '/' not in file_name('https://example.com/../../evil', 'text/css')
+    assert '..' not in Path(file_name('https://example.com/../../evil', 'text/css')).parts
 
 
 @pytest.mark.parametrize('ip', ['127.0.0.1', '10.0.0.1', '169.254.169.254', '::1', '192.168.1.1'])

@@ -13,6 +13,7 @@ from flask import Flask, Response
 from werkzeug.serving import make_server
 
 from turboweb import engine
+from turboweb.paths import relative_url
 
 BROWSER = os.environ.get('TURBOWEB_TEST_BROWSER')
 pytestmark = pytest.mark.skipif(not BROWSER, reason='Set TURBOWEB_TEST_BROWSER to opt into browser tests')
@@ -95,9 +96,9 @@ def test_real_rendered_capture(tmp_path, monkeypatch, store_scripts):
         assert 'Rendered by JavaScript' in first
         assert 'border-top' in first
         assert '<script' not in first
-        assert manifest['urls'][url+'next'] in first
+        assert relative_url(manifest['urls'][url+'next'], job['entry']) in first
         css_text = (folder/'files'/manifest['urls'][url+'site.css']).read_text()
-        assert manifest['urls'][url+'dot.svg'] in css_text
+        assert relative_url(manifest['urls'][url+'dot.svg'], manifest['urls'][url+'site.css']) in css_text
         assert (folder/'preview.png').exists()
         assert (folder/'report.json').exists()
         # Open the resulting archive with all HTTP(S) requests blocked.

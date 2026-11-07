@@ -108,9 +108,49 @@ Use **Browse offline** inside a completed project or **Save as ZIP**. Desktop mo
 python -m http.server 8081
 ```
 
-Then open http://127.0.0.1:8081. Keep the `files` directory intact. All captured documents and resources use flat, deterministic filenames to avoid query-string collisions and simplify relative links. `manifest.json` maps original URLs to files. `report.json` records options, counts, warnings and errors. `missing-resources.json` lists resource URLs and reasons still failing after recovery. Re-capture older projects to benefit from the improved resource collection.
+Then open http://127.0.0.1:8081. Keep the `files` directory intact. New captures preserve URL folder paths and original static filenames inside a separate folder per host. HTML/CSS links are rewritten relative to each saved file; ZIP exports preserve the same directory tree. `manifest.json` maps original URLs to files. `report.json` records options, counts, warnings and errors. `missing-resources.json` lists resource URLs and reasons still failing after recovery. Re-capture older projects to benefit from the improved resource collection.
 
 Data is stored by default in **`~/.turbowebdownloader`**, outside the source tree. Set `TURBOWEB_DATA` to change it. Removing that folder deletes your local library. Preferences are stored in the UI browser's local storage. Interrupted captures are marked on restart; **Capture again** creates a fresh project rather than resuming a partially executed browser session.
+
+### Website-shaped filenames and directories (1.2.0)
+
+New captures use the URL-visible structure, not hashed filenames:
+
+```text
+<project-id>/
+  index.html                         # Opens the captured entry page
+  manifest.json
+  report.json
+  project.json                       # Local application metadata; excluded from ZIP
+  files/
+    example.com/
+      index.html
+      docs/
+        guide.html
+        tutorial/index.html
+      assets/css/style.css
+      images/logo.png
+    cdn.example.com/
+      fonts/brand.woff2
+```
+
+- `/assets/css/style.css` and `/images/logo.png` keep their names and folder paths.
+- Extensionless page routes like `/docs/tutorial` and directory URLs become `docs/tutorial/index.html`. Server-side page names such as `view.php` become `view.php.html` because the archive contains rendered HTML, not runnable server code.
+- Query variants get a short `__q_…` suffix so `photo.jpg?w=400` does not overwrite `photo.jpg?w=800`.
+- Windows-reserved/invalid names are made safe. Case-insensitive name collisions, file/directory conflicts, HTTP/HTTPS duplicates and route collisions get short disambiguating suffixes. Extremely long paths use a `_longpaths` fallback. These are exceptions to exact naming, necessary for portable filesystem output.
+- Each captured HTML/CSS file uses relative links appropriate to its own directory, including cross-host resources. `manifest.json` maps original URLs to the saved filesystem paths.
+- This mirrors **public URLs**, not the site's private server filesystem or backend architecture.
+
+Old archives remain readable/exportable in their existing layout. **Capture again** is required for the new layout; existing files are not silently renamed or migrated.
+
+### Deleting projects
+
+Open a finished project's details and choose **Delete project**. The confirmation asks whether downloaded files should also be deleted:
+
+- **Keep downloaded files** (default): removes the project from the library and marks its metadata as hidden. The archive stays at the displayed path and will not reappear after restart. Open its `index.html` directly or serve the folder locally. There is no automatic re-import UI.
+- **Delete project and downloaded files**: permanently removes the project folder and its application-managed cached ZIP. ZIP copies saved elsewhere are not removed. This operation cannot be undone.
+
+Running/queued captures must first be stopped and allowed to finish finalization. Canceling the deletion dialog makes no changes.
 
 ### Storage location and preflight analysis
 
@@ -174,6 +214,7 @@ turboweb/engine.py       Crawl queue, browser capture, persistence and rewriting
 turboweb/discovery.py    Preflight URL discovery through sitemaps/rendered links
 turboweb/capture_tools.py Lazy preparation, resource discovery and retry requests
 turboweb/exports.py      Disk-backed ZIP generation
+turboweb/paths.py        Website-shaped filenames, relative links, collision safety
 turboweb/native.py       Desktop Save As / Open folder bridge
 turboweb/templates/     English interface
 turboweb/static/        Styles, animations, JavaScript and original branding

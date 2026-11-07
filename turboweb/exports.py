@@ -21,7 +21,7 @@ def build_export(root, job):
     target = exports / (job['id'] + '.zip')
     with LOCK:
         # A stopped/completed project is immutable; its export can be reused.
-        files = [f for f in folder.rglob('*') if f.is_file() and not f.is_symlink() and f.name not in ('project.json', 'project.tmp')]
+        files = [f for f in folder.rglob('*') if f.is_file() and not f.is_symlink() and not (f.parent == folder and f.name in ('project.json', 'project.tmp'))]
         if target.is_file() and target.stat().st_mtime >= max(f.stat().st_mtime for f in files):
             return target
         fd, temp = tempfile.mkstemp(suffix='.zip', dir=exports)

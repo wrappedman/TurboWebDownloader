@@ -1,10 +1,9 @@
 """Bounded browser-based archiver. No target server source is retrieved."""
-import hashlib
 import ipaddress
 import json
-import mimetypes
 import re
 import socket
+import shutil
 import threading
 import time
 from collections import deque
@@ -14,6 +13,7 @@ from urllib.parse import urljoin, urlsplit, urldefrag
 from bs4 import BeautifulSoup
 
 from .browser import launch_browser
+from .paths import website_path, WebsiteLayout, relative_url
 from .capture_tools import (prepare_page, html_resources,
                             fetch_resource, srcset_items, css_dependencies, snapshot_html, RESOURCE_LIMIT, TOTAL_LIMIT)
 
@@ -41,31 +41,26 @@ def public_url(url):
 
 
 def file_name(url, content_type='', page=False):
-    digest = hashlib.sha256(url.encode()).hexdigest()[:24]
-    ext = '.html' if page else mimetypes.guess_extension(content_type.split(';')[0].strip())
-    if ext == '.jpe':
-        ext = '.jpg'
-    if not ext:
-        suffix = Path(urlsplit(url).path).suffix
-        ext = suffix if re.fullmatch(r'\.[a-zA-Z0-9]{1,8}', suffix) else '.bin'
-    return digest + ext
+    return website_path(url, content_type, page)
 
 
-def local_ref(value, base, mapping):
+def local_ref(value, base, mapping, source_path=None):
     if not value or value.startswith(('data:', 'blob:', '#', 'mailto:', 'tel:', 'javascript:')):
         return value
     absolute, fragment = urldefrag(urljoin(base, value))
-    return mapping.get(absolute, absolute) + ('#' + fragment if fragment else '')
+    target = mapping.get(absolute)
+    result = relative_url(target, source_path) if target and source_path else target or absolute
+    return result + ('#' + fragment if fragment else '')
 
 
-def rewrite_css(text, base, mapping):
+def rewrite_css(text, base, mapping, source_path=None):
     def replace(match):
-        return 'url("' + local_ref(match.group(2).strip(), base, mapping).replace('"', '%22') + '")'
+        return 'url("' + local_ref(match.group(2).strip(), base, mapping, source_path).replace('"', '%22') + '")'
     text = re.sub(r'url\(\s*([\'"]?)(.*?)\1\s*\)', replace, text, flags=re.I)
-    return re.sub(r'(@import\s+)([\'"])(.*?)\2', lambda m: m[1] + '"' + local_ref(m[3], base, mapping) + '"', text, flags=re.I)
+    return re.sub(r'(@import\s+)([\'"])(.*?)\2', lambda m: m[1] + '"' + local_ref(m[3], base, mapping, source_path) + '"', text, flags=re.I)
 
 
-def rewrite_html(html, base, mapping, options):
+def rewrite_html(html, base, mapping, options, source_path=None):
     soup = BeautifulSoup(html, 'html.parser')
     for el in soup.find_all('base'):
         el.decompose()
@@ -75,20 +70,20 @@ def rewrite_html(html, base, mapping, options):
     for el in soup.find_all(True):
         for attr in ('href', 'src', 'poster', 'action', 'data-src', 'data-original', 'data-lazy-src', 'xlink:href'):
             if el.has_attr(attr):
-                el[attr] = local_ref(el[attr], base, mapping)
+                el[attr] = local_ref(el[attr], base, mapping, source_path)
         for attr in ('integrity', 'crossorigin', 'nonce'):
             el.attrs.pop(attr, None)
         for attr in ('srcset', 'data-srcset'):
             if el.has_attr(attr):
-                el[attr] = ', '.join(local_ref(url, base, mapping) + (' ' + desc if desc else '') for url, desc in srcset_items(el[attr]))
+                el[attr] = ', '.join(local_ref(url, base, mapping, source_path) + (' ' + desc if desc else '') for url, desc in srcset_items(el[attr]))
         if el.has_attr('style'):
-            el['style'] = rewrite_css(el['style'], base, mapping)
+            el['style'] = rewrite_css(el['style'], base, mapping, source_path)
         if not options['run_scripts']:
             for attr in list(el.attrs):
                 if attr.lower().startswith('on'):
                     del el[attr]
     for style in soup.find_all('style'):
-        style.string = rewrite_css(style.get_text(), base, mapping)
+        style.string = rewrite_css(style.get_text(), base, mapping, source_path)
     if not options['run_scripts']:
         for script in soup.find_all('script'):
             script.decompose()
@@ -102,9 +97,12 @@ class ArchiveManager:
         self.lock = threading.RLock()
         self.jobs = {}
         self.cancel_events = {}
+        self.workers = set()
         for path in self.root.glob('*/project.json'):
             try:
                 data = json.loads(path.read_text('utf-8'))
+                if data.get('hidden_from_library'):
+                    continue
                 if data['status'] in ('queued', 'running', 'stopping'):
                     data.update(status='interrupted', message='Interrupted. You can retry this project.')
                 self.jobs[data['id']] = data
@@ -137,19 +135,43 @@ class ArchiveManager:
         ident = uuid.uuid4().hex[:12]
         job = dict(id=ident, name=name, url=url, options=options, status='queued',
                    created=time.time(), pages=0, assets=0, bytes=0, failed=0, logs=[],
-                   message='Waiting for browser…', entry=None, failed_assets=0, discovered=1)
+                   message='Waiting for browser…', entry=None, failed_assets=0, discovered=1, layout='website-paths-v1')
         with self.lock:
             self.jobs[ident] = job
+            self.workers.add(ident)
             self.cancel_events[ident] = threading.Event()
             self.save(job)
         threading.Thread(target=self.run, args=(job,), daemon=True).start()
         return job
+
+    def delete(self, ident, delete_files=False):
+        from .exports import LOCK
+        with LOCK, self.lock:
+            if ident not in self.jobs:
+                raise KeyError(ident)
+            job = self.jobs[ident]
+            if job['status'] in ('queued', 'running', 'stopping') or ident in self.workers:
+                raise ValueError('Stop the capture and wait for finalization before deleting this project.')
+            folder = self.root / ident
+            if folder.is_symlink() or folder.resolve().parent != self.root:
+                raise ValueError('Refusing to delete a project outside the storage folder.')
+            if delete_files:
+                if folder.exists():
+                    shutil.rmtree(folder)
+                (self.root / '.exports' / (ident + '.zip')).unlink(missing_ok=True)
+            else:
+                self.update(job, hidden_from_library=True)
+            del self.jobs[ident]
+            self.cancel_events.pop(ident, None)
+            return dict(deleted=True, files_deleted=delete_files, storage_path=str(folder))
 
     def run(self, job):
         event = self.cancel_events[job['id']]
         with self.gate:
             if event.is_set():
                 self.update(job, status='cancelled', message='Cancelled before capture.')
+                with self.lock:
+                    self.workers.discard(job['id'])
                 return
             self.update(job, status='running', message='Launching Chromium…')
             try:
@@ -161,7 +183,11 @@ class ArchiveManager:
                 self.update(job, status='failed', message='Capture failed. See the activity log for details.')
             finally:
                 folder = self.root / job['id']
-                (folder / 'report.json').write_text(json.dumps(job, indent=2), encoding='utf-8')
+                with self.lock:
+                    try:
+                        (folder / 'report.json').write_text(json.dumps(job, indent=2), encoding='utf-8')
+                    finally:
+                        self.workers.discard(job['id'])
 
     def capture(self, job, event):
         from playwright.sync_api import sync_playwright
@@ -170,8 +196,10 @@ class ArchiveManager:
         folder = self.root / job['id'] / 'files'
         folder.mkdir(exist_ok=True)
         mapping, assets, pages = {}, {}, []
+        layout = WebsiteLayout()
         queue = deque([(job['url'], 0)])
         seen = set()
+        captured_urls = set()
         origin = urlsplit(job['url']).netloc
         robots = None
         robots_text = ''
@@ -236,7 +264,8 @@ class ArchiveManager:
                     raise ValueError('Resource size budget exceeded')
                 if 'text/html' in mime:
                     raise ValueError('Expected a resource, received an HTML page')
-                filename = file_name(url, mime)
+                filename = layout.allocate(url, mime)
+                (folder / filename).parent.mkdir(parents=True, exist_ok=True)
                 (folder / filename).write_bytes(body)
                 assets[url] = (filename, mime)
                 mapping[url] = filename
@@ -312,12 +341,17 @@ class ArchiveManager:
                         if urlsplit(final_url).netloc != origin:
                             self.log(job, 'Skipped page redirected outside the target site.', 'warning')
                             continue
+                        if final_url in captured_urls:
+                            mapping[url] = mapping[final_url]
+                            continue
                         base = page.evaluate('document.baseURI')
                         html = snapshot_html(page)
-                        filename = file_name(url, page=True)
+                        filename = layout.allocate(final_url, page=True)
                         mapping[url] = filename
                         mapping[final_url] = filename
                         pages.append((url, base, filename, html))
+                        captured_urls.add(final_url)
+                        seen.add(final_url)
                         if not job['entry']:
                             self.update(job, entry=filename)
                             try:
@@ -380,12 +414,13 @@ class ArchiveManager:
                 self.update(job, failed_assets=len(failures))
                 self.update(job, message='Rewriting links and formatting source…')
                 for url, base, filename, html in pages:
-                    (folder / filename).write_text(rewrite_html(html, base, mapping, options), encoding='utf-8')
+                    (folder / filename).parent.mkdir(parents=True, exist_ok=True)
+                    (folder / filename).write_text(rewrite_html(html, base, mapping, options, filename), encoding='utf-8')
                 for url, (filename, mime) in assets.items():
                     path = folder / filename
                     try:
                         if 'css' in mime:
-                            text = rewrite_css(path.read_text('utf-8'), url, mapping)
+                            text = rewrite_css(path.read_text('utf-8'), url, mapping, filename)
                             if options['beautify']:
                                 import cssbeautifier
                                 text = cssbeautifier.beautify(text)
@@ -395,10 +430,10 @@ class ArchiveManager:
                             path.write_text(jsbeautifier.beautify(path.read_text('utf-8')), encoding='utf-8')
                     except (UnicodeError, ValueError) as exc:
                         self.log(job, 'Kept original source: ' + filename + ' — ' + str(exc)[:80], 'warning')
-                (folder.parent / 'manifest.json').write_text(json.dumps(dict(source=job['url'], entry=job['entry'], urls=mapping), indent=2), encoding='utf-8')
+                (folder.parent / 'manifest.json').write_text(json.dumps(dict(layout='website-paths-v1', source=job['url'], entry=job['entry'], urls=mapping), indent=2), encoding='utf-8')
                 if job['entry']:
-                    (folder.parent / 'index.html').write_text('<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="0;url=files/' + job['entry'] + '"><title>Offline archive</title><a href="files/' + job['entry'] + '">Open archive</a>', encoding='utf-8')
-                self.update(job, bytes=sum(f.stat().st_size for f in folder.iterdir() if f.is_file()))
+                    (folder.parent / 'index.html').write_text('<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="0;url=files/' + relative_url(job['entry'], 'index.html') + '"><title>Offline archive</title><a href="files/' + relative_url(job['entry'], 'index.html') + '">Open archive</a>', encoding='utf-8')
+                self.update(job, bytes=sum(f.stat().st_size for f in folder.rglob('*') if f.is_file()))
                 self.log(job, f'Captured {len(pages)} pages and {len(assets)} resources; {len(failures)} resources failed. Links outside the capture remain online.', 'success')
             finally:
                 browser.close()

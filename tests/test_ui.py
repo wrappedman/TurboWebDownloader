@@ -89,6 +89,29 @@ def test_zip_download_and_native_export_dispatch(tmp_path):
             page.evaluate("window.pywebview = {api: {export_project: async (id) => ({path: 'C:/Exports/' + id + '.zip'})}}")
             page.get_by_role('button', name='Save as ZIP').click()
             page.wait_for_function("document.querySelector('#toast').textContent.includes('C:/Exports/abc.zip')")
+            page.get_by_role('button', name='Delete project', exact=True).click()
+            assert page.locator('#delete-dialog [value="keep"]').is_checked()
+            page.locator('#delete-cancel').click()
+            assert 'abc' in manager.jobs and folder.exists()
+            page.get_by_role('button', name='Delete project', exact=True).click()
+            page.get_by_role('button', name='Remove from library', exact=True).click()
+            page.wait_for_function("!document.querySelector('#delete-dialog').open")
+            assert 'abc' not in manager.jobs and folder.exists()
+            with manager.lock:
+                manager.jobs['purge'] = {**manager.jobs.get('abc', {}), 'id':'purge','name':'Purge fixture',
+                    'url':'https://example.com/','created':1,'status':'completed','pages':1,'assets':0,
+                    'bytes':20,'failed':0,'logs':[],'message':'Ready','entry':'start.html'}
+                manager.save(manager.jobs['purge'])
+            purge = tmp_path/'purge'
+            (purge/'files').mkdir()
+            (purge/'files/start.html').write_text('Offline')
+            page.reload()
+            page.locator('button[data-detail="purge"]').click()
+            page.get_by_role('button',name='Delete project',exact=True).click()
+            page.locator('#delete-dialog [value="files"]').check()
+            page.get_by_role('button',name='Delete project & files',exact=True).click()
+            page.wait_for_function("!document.querySelector('#delete-dialog').open")
+            assert 'purge' not in manager.jobs and not purge.exists()
             browser.close()
     finally:
         server.shutdown()
