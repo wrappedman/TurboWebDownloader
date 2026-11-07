@@ -1,0 +1,5 @@
+Flask>=3.0,<4
+playwright>=1.48,<2
+beautifulsoup4>=4.12,<5
+jsbeautifier>=1.15,<2
+cssbeautifier>=1.15,<2
