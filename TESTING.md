@@ -29,7 +29,7 @@ The deterministic fixture deliberately bypasses the engine's private-address gua
 
 ## Not validated here
 
-- Windows PyInstaller build or Windows WebView2 desktop launch (requires Windows).
+- Manual Windows WebView2 desktop interaction on a destination PC (the automated Windows packaging/self-test was subsequently validated; see the final section).
 - macOS / Linux native pywebview packaging.
 - Arbitrary external-site compatibility, complex SPA interactions, authentication, streaming media or pixel-perfect equivalence.
 - Security as a public internet service; this is a trusted local application.
@@ -53,3 +53,18 @@ Native Save As is unit-tested with a mocked pywebview window; the actual Windows
 Latest complete run: **68 passed** with the alternate Chromium. Without an explicit test browser: **63 passed, 5 skipped**. Added filename/path tests for original names, extensionless pages, query variants, Windows reserved characters, path traversal, case/file-directory collisions and nested relative URL encoding. A two-origin browser fixture checks nested page/CSS/image/CDN directories, ZIP member paths and offline CSS/image/navigation with HTTP(S) blocked. Existing flat-layout export tests remain passing for compatibility.
 
 Deletion tests cover keeping files across application restart, permanent removal and ZIP-cache cleanup, preservation of external ZIPs, invalid input, active/finalizing captures, and unknown project IDs. UI tests exercise cancellation, keep-files removal and permanent deletion through the actual confirmation dialog.
+
+## Windows build bootstrap and packaged EXE verification
+
+The Windows workflow now invokes the same `build-windows.bat` supplied to users, through Windows PowerShell 5.1, with `-NoPause -NonInteractive -BrowserMode Bundled`. It parses both PowerShell scripts before execution, verifies prerequisites, creates its own build environment, packages the application, and runs the produced windowed EXE with `--self-test <report.json>` before uploading artifacts.
+
+Confirmed successful Windows build + packaged non-GUI self-test:
+
+- [Run 42350241883](https://github.com/wrappedman/TurboWebDownloader/actions/runs/42350241883), commit `46afd34`.
+- [Run 42350539922](https://github.com/wrappedman/TurboWebDownloader/actions/runs/42350539922), commit `7cf676c` (including native command logging improvements).
+
+The second run also passed the unit/browser/UI job. Artifacts include `TurboWebDownloader-Windows-x64` (about 397 MB compressed) and `Windows-build-diagnostics`. A separate earlier duplicate PR run had a failed Linux test job while its Windows build still succeeded; offline image/CSS assertions now wait for decoding/style application instead of sampling immediately after redirect/navigation, and CI emits individual test failures as annotations for diagnosis.
+
+Local latest validation: **71 passed** with the alternate Chromium; **65 passed, 6 skipped** without it. Added packaged-startup tests cover frozen browser-path setup, JSON error reporting and the non-GUI test flow. PowerShell syntax was also checked locally with tree-sitter and on Windows with the actual PowerShell parser.
+
+The packaged self-test verifies pywebview/clr imports, bundled templates and static files, and real capture-browser rendering without opening a window. It does **not** certify interactive WebView2 behavior, antivirus compatibility, every destination Windows configuration, the first-time installation of every prerequisite on a completely clean PC, or the system-browser fallback on every version. Official installer signature checks and post-install checks are implemented, but fresh-machine bootstrap paths still require manual validation. No signed MSI/one-file installer is produced.
