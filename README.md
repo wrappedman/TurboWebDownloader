@@ -27,7 +27,7 @@ python -m venv .venv
 # macOS / Linux:
 source .venv/bin/activate
 
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 python -m playwright install chromium
 python run.py
 ```
@@ -48,6 +48,19 @@ python desktop.py
 Windows needs the Microsoft Edge WebView2 runtime (normally present on Windows 10/11). Linux pywebview needs a compatible GTK or Qt webview backend; see the pywebview installation documentation. Web mode works without pywebview.
 
 ### Windows quick start
+
+For the web interface, double-click **`start-web-windows.bat`**. It uses the Python available on your system, creates `.venv`, installs the web dependencies and Chromium, and starts the local server. Then open **http://127.0.0.1:8080**. Keep the console open.
+
+If you prefer Windows CMD commands (no environment activation required):
+
+```bat
+python -m venv .venv
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+.venv\Scripts\python.exe -m playwright install chromium
+.venv\Scripts\python.exe run.py
+```
+
+**`ModuleNotFoundError: No module named 'flask'`** means the Python running the application does not have its dependencies installed. Use the explicit `.venv\Scripts\python.exe` commands above for both installation and execution; installing into a different Python environment will not fix it. Do not install only Flask: `requirements.txt` contains the other required packages too.
 
 With Python 3.11+ installed, double-click **`start-windows.bat`**. It prepares the virtual environment, installs the desktop dependencies and Chromium, and opens the native application. The first setup requires internet access. Alternatively, use the manual commands above.
 
