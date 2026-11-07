@@ -15,10 +15,24 @@ $log = Join-Path $build ('logs\build-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + 
 Start-Transcript -Path $log | Out-Null
 $success = $false
 
+function Invoke-NativeLog {
+    param([string]$Exe, [string[]]$Arguments)
+    if (-not (Test-Path -LiteralPath $Exe -PathType Leaf)) { throw "Executable not found: $Exe" }
+    $previous = $ErrorActionPreference
+    try {
+        # In Windows PowerShell, stderr redirection creates ErrorRecords even for
+        # successful native warnings. Log them, then rely on the actual exit code.
+        $ErrorActionPreference = 'Continue'
+        & $Exe @Arguments 2>&1 | ForEach-Object { Write-Host $_ }
+        $code = $LASTEXITCODE
+    } finally { $ErrorActionPreference = $previous }
+    return $code
+}
+
 function Invoke-Checked {
     param([string]$Exe, [string[]]$Arguments)
-    & $Exe @Arguments
-    if ($LASTEXITCODE -ne 0) { throw "Command failed ($LASTEXITCODE): $Exe $($Arguments -join ' ')" }
+    $code = Invoke-NativeLog $Exe $Arguments
+    if ($code -ne 0) { throw "Command failed ($code): $Exe $($Arguments -join ' ')" }
 }
 
 function Test-BuildPython {
@@ -104,11 +118,11 @@ try {
     $env:PLAYWRIGHT_BROWSERS_PATH = $browsers
     $bundled = $false
     if ($BrowserMode -ne 'System') {
-        & $venvPython -m playwright install chromium
-        $bundled = $LASTEXITCODE -eq 0
+        $code = Invoke-NativeLog $venvPython @('-m','playwright','install','chromium')
+        $bundled = $code -eq 0
         if ($bundled) {
-            & $venvPython -c "from playwright.sync_api import sync_playwright; p=sync_playwright().start(); b=p.chromium.launch(headless=True); print('Bundled Chromium:', b.version); b.close(); p.stop()"
-            $bundled = $LASTEXITCODE -eq 0
+            $code = Invoke-NativeLog $venvPython @('-c',"from playwright.sync_api import sync_playwright; p=sync_playwright().start(); b=p.chromium.launch(headless=True); print('Bundled Chromium:', b.version); b.close(); p.stop()")
+            $bundled = $code -eq 0
         }
         if (-not $bundled -and $BrowserMode -eq 'Bundled') { throw 'Bundled Chromium could not be downloaded/launched. A 403/location restriction cannot be repaired by this script. Use -BrowserMode System with installed Chrome/Edge, or configure a trusted PLAYWRIGHT_DOWNLOAD_HOST/proxy, then retry.' }
     }

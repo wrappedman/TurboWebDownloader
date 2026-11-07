@@ -1,7 +1,7 @@
 # Windows PowerShell 5.1+. Also copied into the portable distribution.
 [CmdletBinding()]
 param(
-    [string]$DownloadDirectory = (Join-Path $PSScriptRoot 'prerequisites'),
+    [string]$DownloadDirectory = (Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'TurboWebDownloader\prerequisites'),
     [switch]$NonInteractive
 )
 $ErrorActionPreference = 'Stop'

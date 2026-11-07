@@ -92,13 +92,54 @@ The **Validate and build** GitHub Actions workflow runs tests and creates a Wind
 
 ### Windows EXE build
 
-Run **`build-windows.bat` on Windows**. It creates a virtual environment, installs dependencies, downloads Chromium, generates the application icon and builds a windowed PyInstaller distribution:
+Run **`build-windows.bat`** from the updated source checkout on **Windows 10/11 x64** (compatible desktop Windows Server installations may also work). Keep the `scripts` folder beside the BAT. Initial setup requires internet access and can prompt for administrator permission; if Windows requests a restart, restart and run the BAT again.
 
-```
+The builder now:
+
+1. Detects .NET Framework 4.8+, Microsoft Visual C++ x64 runtime and Evergreen WebView2; downloads signed official Microsoft installers for missing prerequisites and verifies installation.
+2. Finds Python **3.11-3.13 x64**. If none is available (including when only Python 3.14 is installed), downloads a signed Python 3.13 installer from python.org and installs a separate build-only Python. Your normal Python and `.venv` are not changed.
+3. Uses an isolated **`build/venv`**, installs Python build dependencies through that exact interpreter, and runs `pip check`.
+4. Tries to download and launch Playwright Chromium. In default **Auto** mode, if the CDN is blocked, it validates installed Chrome/Edge instead. It never reports a successful capture-capable build unless a browser can launch.
+5. Runs PyInstaller, then launches the **produced EXE** in a non-GUI self-test: packaged imports, templates/static files and real browser rendering are checked before success is reported.
+6. Writes build metadata, a portable ZIP and a separate prerequisite installer helper for other PCs.
+
+Outputs:
+
+```text
 dist/TurboWebDownloader/TurboWebDownloader.exe
+dist/TurboWebDownloader/Install-prerequisites.bat
+dist/TurboWebDownloader/build-info.json
+dist/TurboWebDownloader-Windows-x64.zip
+build/logs/build-<timestamp>.log
+build/logs/packaged-self-test.json
 ```
 
-**Distribute the entire `dist/TurboWebDownloader` directory**, including `_internal` and the bundled browser, not the EXE alone. This intentionally uses `--onedir` rather than a slow, large self-extracting single EXE. Chromium makes the distribution several hundred megabytes. Build on the Windows architecture you intend to support. This repository includes the build script, not a pre-built/signed executable. A Windows build has not been validated in this Linux workspace.
+**Distribute the entire application folder or the portable ZIP**, including `_internal`, not the EXE alone. No Python installation is required to run the packaged application. On another PC, `Install-prerequisites.bat` checks/installs missing .NET 4.8+, VC++ x64 and WebView2 (internet/UAC may be needed). This helper is not a complete MSI installer or an offline OS prerequisite bundle.
+
+Build modes in Windows CMD:
+
+```bat
+REM Default: try bundled Chromium, fall back to installed Chrome/Edge if needed
+build-windows.bat
+
+REM Skip the blocked Chromium CDN; require a working installed Chrome/Edge
+build-windows.bat -BrowserMode System
+
+REM Require Chromium inside the distribution; fail rather than fall back
+build-windows.bat -BrowserMode Bundled
+
+REM Select a specific compatible build interpreter
+build-windows.bat -PythonPath "C:\Python313\python.exe"
+
+REM CI: no pause or UAC prompts (missing admin-only prerequisites cause failure)
+build-windows.bat -NoPause -NonInteractive -BrowserMode Bundled
+```
+
+**System-browser builds are not browser-independent**: every destination PC needs Chrome/Edge (or a configured compatible Chromium). Check `build-info.json` / `START HERE.txt` to see whether the build bundles Chromium. Official CDN location restrictions, corporate policies and blocked Microsoft/python.org downloads cannot be guaranteed away; a failure is logged with the relevant URL and next steps. `PLAYWRIGHT_DOWNLOAD_HOST` and standard proxy configuration can be supplied for trusted environments; the script does not use unofficial mirrors or disable TLS verification.
+
+Windows ARM64/32-bit, older Windows, and a single self-contained one-file EXE are not supported by this recipe. The non-GUI self-test does not replace a manual GUI/WebView2 check. The application is unsigned, so Windows may show publisher/SmartScreen warnings. Keep Windows protections enabled and inspect your build source/artifacts. If a build fails, share **the end of `build/logs/build-*.log`**, rather than only the final BAT message. For path-length issues, use a short checkout location such as `C:\TurboWebDownloader`.
+
+GitHub Actions uses this same BAT (Windows PowerShell 5.1), not a separate packaging command, and uploads both the distribution and build diagnostics. See `TESTING.md` for validation status.
 
 ### Offline archives
 
