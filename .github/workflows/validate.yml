@@ -41,23 +41,30 @@ jobs:
         with:
           python-version: '3.11'
           cache: pip
-      - run: pip install -r requirements-desktop.txt
-      - name: Install bundled Chromium
-        shell: pwsh
+      - name: Validate PowerShell syntax (Windows PowerShell 5.1)
+        shell: powershell
         run: |
-          $env:PLAYWRIGHT_BROWSERS_PATH = "$pwd\build\browsers"
-          python -m playwright install chromium
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - run: python scripts/make_icon.py
-      - name: Package native application
-        shell: pwsh
-        run: |
-          python -m PyInstaller --noconfirm --clean --windowed --onedir --name TurboWebDownloader --icon turboweb/static/app.ico --collect-all playwright --add-data "turboweb/templates;turboweb/templates" --add-data "turboweb/static;turboweb/static" --add-data "build/browsers;browsers" desktop.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          Copy-Item README.md,LICENSE -Destination dist/TurboWebDownloader
-      - uses: actions/upload-artifact@v4
+          foreach ($file in Get-ChildItem scripts/*.ps1) {
+            $parseErrors = $null
+            $tokens = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$tokens, [ref]$parseErrors)
+            if ($parseErrors.Count) { $parseErrors | Format-List; exit 1 }
+          }
+      - name: Build through the same BAT used locally
+        shell: cmd
+        run: build-windows.bat -NoPause -NonInteractive -BrowserMode Bundled
+      - name: Upload portable Windows distribution
+        uses: actions/upload-artifact@v4
         with:
           name: TurboWebDownloader-Windows-x64
           path: dist/TurboWebDownloader/
           if-no-files-found: error
+          retention-days: 14
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Windows-build-diagnostics
+          path: build/logs/
+          if-no-files-found: warn
           retention-days: 14

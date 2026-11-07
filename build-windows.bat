@@ -2,32 +2,18 @@
 setlocal
 cd /d "%~dp0"
 echo === TurboWebDownloader Windows build ===
-where py >nul 2>nul
+where powershell.exe >nul 2>nul
 if errorlevel 1 (
-  echo Install Python 3.11 or newer from python.org, then run this file again.
+  echo Windows PowerShell 5.1 or newer is required. Windows 10/11 x64 is supported.
   pause
   exit /b 1
 )
-if not exist .venv py -3 -m venv .venv
-if errorlevel 1 goto :error
-call .venv\Scripts\activate.bat
-python -m pip install --upgrade pip
-if errorlevel 1 goto :error
-pip install -r requirements-desktop.txt
-if errorlevel 1 goto :error
-set PLAYWRIGHT_BROWSERS_PATH=%CD%\build\browsers
-python -m playwright install chromium
-if errorlevel 1 goto :error
-python scripts\make_icon.py
-if errorlevel 1 goto :error
-pyinstaller --noconfirm --clean --windowed --onedir --name TurboWebDownloader --icon turboweb\static\app.ico --collect-all playwright --add-data "turboweb\templates;turboweb/templates" --add-data "turboweb\static;turboweb/static" --add-data "build\browsers;browsers" desktop.py
-if errorlevel 1 goto :error
-echo.
-echo Done! Run dist\TurboWebDownloader\TurboWebDownloader.exe
-echo Distribute the ENTIRE dist\TurboWebDownloader folder, not just the EXE.
+set "BUILD_PS=powershell.exe"
+if exist "%SystemRoot%\Sysnative\WindowsPowerShell\v1.0\powershell.exe" set "BUILD_PS=%SystemRoot%\Sysnative\WindowsPowerShell\v1.0\powershell.exe"
+"%BUILD_PS%" -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\build_windows.ps1" %*
+set "BUILD_RESULT=%ERRORLEVEL%"
+if not "%BUILD_RESULT%"=="0" echo Build failed. See build\logs for the complete diagnostic log.
+for %%A in (%*) do if /I "%%~A"=="-NoPause" goto :finished
 pause
-exit /b 0
-:error
-echo Build failed. Review the error above.
-pause
-exit /b 1
+:finished
+exit /b %BUILD_RESULT%
