@@ -3,7 +3,6 @@ import hashlib
 import ipaddress
 import json
 import mimetypes
-import os
 import re
 import socket
 import threading
@@ -13,6 +12,8 @@ from pathlib import Path
 from urllib.parse import urljoin, urlsplit, urldefrag
 
 from bs4 import BeautifulSoup
+
+from .browser import launch_browser
 
 ASSET_TYPES = {'stylesheet': 'styles', 'script': 'scripts', 'image': 'images', 'font': 'fonts', 'media': 'media'}
 DEFAULTS = dict(max_pages=25, depth=2, delay=500, timeout=30000, images=True,
@@ -171,7 +172,8 @@ class ArchiveManager:
         origin = urlsplit(job['url']).netloc
         robots = None
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True, executable_path=os.environ.get('TURBOWEB_CHROMIUM') or None, args=['--disable-dev-shm-usage'])
+            browser, browser_label = launch_browser(p)
+            self.log(job, 'Capture browser: ' + browser_label)
             context = browser.new_context(viewport={'width': 1440, 'height': 1000}, device_scale_factor=1, accept_downloads=False, service_workers='block', user_agent='TurboWebDownloader/1.0 (personal offline archive)')
             def route_request(route):
                 try:

@@ -18,7 +18,7 @@
 
 ## Run locally
 
-Requires **Python 3.11+**. Initial dependency/browser installation requires internet access; viewing captured content does not.
+Requires **Python 3.11+**. Initial Python dependency installation requires internet access; viewing captured content does not. Capture can use an installed Chrome/Edge or a separately installed Playwright Chromium.
 
 ```bash
 python -m venv .venv
@@ -28,6 +28,7 @@ python -m venv .venv
 source .venv/bin/activate
 
 python -m pip install -r requirements.txt
+# Optional if Chrome/Edge is not installed:
 python -m playwright install chromium
 python run.py
 ```
@@ -49,7 +50,7 @@ Windows needs the Microsoft Edge WebView2 runtime (normally present on Windows 1
 
 ### Windows quick start
 
-For the web interface, double-click **`start-web-windows.bat`**. It uses the Python available on your system, creates `.venv`, installs the web dependencies and Chromium, and starts the local server. Then open **http://127.0.0.1:8080**. Keep the console open.
+For the web interface, double-click **`start-web-windows.bat`**. It uses the Python available on your system, creates `.venv`, installs the web dependencies, detects an existing browser, and starts the local server. It does not download Chromium or block startup when no capture browser is found. Then open **http://127.0.0.1:8080**. Keep the console open.
 
 If you prefer Windows CMD commands (no environment activation required):
 
@@ -62,7 +63,26 @@ python -m venv .venv
 
 **`ModuleNotFoundError: No module named 'flask'`** means the Python running the application does not have its dependencies installed. Use the explicit `.venv\Scripts\python.exe` commands above for both installation and execution; installing into a different Python environment will not fix it. Do not install only Flask: `requirements.txt` contains the other required packages too.
 
-With Python 3.11+ installed, double-click **`start-windows.bat`**. It prepares the virtual environment, installs the desktop dependencies and Chromium, and opens the native application. The first setup requires internet access. Alternatively, use the manual commands above.
+With Python 3.11+ installed, double-click **`start-windows.bat`**. It prepares the virtual environment, installs the desktop dependencies, detects an existing browser, and opens the native application without downloading Chromium. The first setup requires internet access. Alternatively, use the manual commands above.
+
+### Chromium download blocked (403 / location restriction)
+
+A successful pip installation followed by `not available in your location` is a browser CDN restriction, not a Flask or Python installation error. Updated startup BAT files no longer require that download. The capture engine tries:
+
+1. `TURBOWEB_CHROMIUM`, when explicitly set (must be a valid executable path).
+2. Playwright's installed/bundled Chromium.
+3. Existing Microsoft Edge or Google Chrome in standard system/user installation folders, then Chromium-family browsers found on PATH.
+
+The UI can open with no browser available, but a new capture will report an actionable error until one is available. System browsers are launched with a separate temporary profile; this does not import your normal logged-in browser session. Browser versions and enterprise policies can affect automation compatibility.
+
+For example, in Windows CMD, **if this executable exists**:
+
+```bat
+set "TURBOWEB_CHROMIUM=C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+.venv\Scripts\python.exe run.py
+```
+
+Or launch `.venv\Scripts\python.exe desktop.py` from the same CMD window. Chrome is commonly installed at `C:\Program Files\Google\Chrome\Application\chrome.exe`. Use the actual installed path, not a guessed one. Run `.venv\Scripts\python.exe -m turboweb.browser` to list detected browsers without downloading anything.
 
 ### Automated Windows download
 

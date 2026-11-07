@@ -26,8 +26,8 @@ if errorlevel 1 (
 )
 ".venv\Scripts\python.exe" -m pip install -r requirements.txt
 if errorlevel 1 goto :error
-".venv\Scripts\python.exe" -m playwright install chromium
-if errorlevel 1 goto :error
+".venv\Scripts\python.exe" -m turboweb.browser
+if errorlevel 1 echo Browser detection failed. The app will still start; see capture logs for details.
 echo.
 echo Open http://127.0.0.1:8080 in your browser after the server starts.
 echo Keep this window open while using the app. Press Ctrl+C to stop.
@@ -37,6 +37,6 @@ exit /b 0
 :error
 echo.
 echo Setup or startup failed. Review the error above.
-echo Dependency and Chromium installation require an internet connection.
+echo Installing Python dependencies requires an internet connection.
 pause
 exit /b 1

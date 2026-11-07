@@ -10,12 +10,11 @@ if errorlevel 1 (
 )
 if not exist .venv py -3 -m venv .venv
 if errorlevel 1 goto :error
-call .venv\Scripts\activate.bat
-python -m pip install -r requirements-desktop.txt
+".venv\Scripts\python.exe" -m pip install -r requirements-desktop.txt
 if errorlevel 1 goto :error
-python -m playwright install chromium
-if errorlevel 1 goto :error
-python desktop.py
+".venv\Scripts\python.exe" -m turboweb.browser
+if errorlevel 1 echo Browser detection failed. The app will still start; see capture logs for details.
+".venv\Scripts\python.exe" desktop.py
 if errorlevel 1 goto :error
 exit /b 0
 :error

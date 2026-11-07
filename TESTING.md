@@ -35,3 +35,9 @@ The deterministic fixture deliberately bypasses the engine's private-address gua
 - Security as a public internet service; this is a trusted local application.
 
 The repository includes a Windows build BAT, not a pre-built or signed EXE.
+
+## Follow-up: blocked browser downloads
+
+Startup launchers no longer force a Playwright browser download. Added six tests covering installed Windows Edge discovery when Playwright Chromium is absent, bundled-browser priority, explicit paths with spaces/quotes, invalid overrides, no-browser diagnostics and launch-failure fallback. Discovery tests simulate Windows paths; they are not evidence of a real Windows desktop launch.
+
+Latest validation: 34 unit/API/startup tests pass; 3 optional browser checks skip without an explicit executable. With the alternate local Chromium, all 37 tests pass (including the existing rendered capture and UI checks).
